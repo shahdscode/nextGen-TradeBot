@@ -11,9 +11,27 @@ stable-baselines3==2.3.2
 torch==2.3.1
 numpy==1.26.4
 pandas==2.2.2
-yfinance==0.2.40
+yfinance>=0.2.54,<2
 stockstats==0.6.2
 pyfolio-reloaded==0.9.5
 matplotlib==3.9.0
 scipy==1.13.1
 seaborn==0.12.2
+# Auth (bcrypt directly — passlib breaks with bcrypt 4.1+)
+python-jose[cryptography]==3.3.0
+bcrypt>=4.0.1,<5
+# ML
+xgboost==2.0.3
+scikit-learn==1.5.0
+shap==0.45.1
+optuna==3.6.1
+hmmlearn==0.3.2
+PyWavelets==1.6.0
+# Sentiment (English FinBERT + Arabic AraBERT via same library)
+transformers==4.41.0
+# News
+requests==2.32.3
+# Parquet step-log support (optional but recommended for performance)
+pyarrow>=16.0.0
+# PostgreSQL support (optional — use DATABASE_URL=postgresql://... in .env)
+psycopg2-binary>=2.9.9
