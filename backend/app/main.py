@@ -3,11 +3,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.database import create_tables
 from app import finrl_wrapper
 from app.routers import data, training, backtest, paper_trading
+from app.routers import auth, ml, signals, market, research, mobile
 
 app = FastAPI(
-    title="FinRL Dashboard API",
-    description="REST API for training, backtesting, and paper trading FinRL agents",
-    version="1.0.0",
+    title="NextGen TradeBot API",
+    description="AI-powered trading signals with XGBoost, LSTM, and FinRL PPO",
+    version="2.0.0",
 )
 
 app.add_middleware(
@@ -22,6 +23,17 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup():
     create_tables()
+    # Ensure default admin exists for first run
+    _seed_default_admin()
+
+
+def _seed_default_admin():
+    try:
+        from app.services.auth_service import create_user, get_user_by_username
+        if not get_user_by_username("admin"):
+            create_user(username="admin", password="admin123", role="admin", email="admin@tradebot.local")
+    except Exception:
+        pass
 
 
 @app.get("/health")
@@ -32,11 +44,12 @@ def health():
 @app.get("/")
 def root():
     return {
-        "name": "FinRL Dashboard API",
+        "name": "NextGen TradeBot API",
         "status": "ok",
         "docs": "/docs",
         "health": "/health",
         "api_info": "/api/info",
+        "version": "2.0.0",
     }
 
 
@@ -51,7 +64,14 @@ def info():
     }
 
 
+# ── Routers ──────────────────────────────────────────────────────────────────
+app.include_router(auth.router, prefix="/api")
 app.include_router(data.router, prefix="/api")
 app.include_router(training.router, prefix="/api")
 app.include_router(backtest.router, prefix="/api")
 app.include_router(paper_trading.router, prefix="/api")
+app.include_router(ml.router, prefix="/api")
+app.include_router(signals.router, prefix="/api")
+app.include_router(market.router, prefix="/api")
+app.include_router(research.router, prefix="/api")
+app.include_router(mobile.router, prefix="/api")

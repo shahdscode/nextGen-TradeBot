@@ -49,30 +49,17 @@ def download_data(
             if source == "alpaca" and (not settings.alpaca_api_key or not settings.alpaca_api_secret):
                 raise ValueError("ALPACA_API_KEY and ALPACA_API_SECRET are required for alpaca source")
 
-            if not FINRL_AVAILABLE:
-                raise ValueError("FinRL pipeline unavailable")
+            from app.services.price_data import download_yahoo_ohlcv
 
-            from finrl.meta.preprocessor.yahoodownloader import YahooDownloader
-            from finrl.meta.preprocessor.preprocessors import FeatureEngineer
-
-            # FinRL's downloader is used as the canonical historical data path.
-            df = YahooDownloader(
+            df = download_yahoo_ohlcv(
+                tickers=tickers,
                 start_date=start_date,
                 end_date=end_date,
-                ticker_list=tickers,
-            ).fetch_data()
-
-            fe = FeatureEngineer(
-                use_technical_indicator=True,
-                tech_indicator_list=indicators,
-                use_turbulence=True,
-                user_defined_feature=False,
+                indicators=indicators,
             )
-            df = fe.preprocess_data(df)
             if df.empty:
                 raise ValueError("no data is fetched.")
         except Exception:
-            # External feeds can be flaky or unavailable in local/dev contexts.
             df = _generate_synthetic_market_data(
                 tickers=tickers,
                 start_date=start_date,
@@ -252,10 +239,12 @@ def _generate_synthetic_market_data(
 ) -> pd.DataFrame:
     import numpy as np
 
+    from app.services.price_data import TICKER_BASE_PRICE
+
     dates = pd.date_range(start=start_date, end=end_date, freq="B")
     rows = []
     for ticker in tickers:
-        price = 100.0
+        price = float(TICKER_BASE_PRICE.get(ticker.upper(), 100.0))
         for date in dates:
             price *= 1 + np.random.normal(0, 0.01)
             rows.append({

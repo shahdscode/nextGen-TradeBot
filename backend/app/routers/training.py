@@ -40,7 +40,16 @@ def train(req: TrainRequest):
     db.commit()
     db.close()
 
-    train_task.delay(run_id, req.data_job_id, req.algorithm, req.hyperparams or {})
+    hp = dict(req.hyperparams or {})
+    if req.train_start:
+        hp["train_start"] = req.train_start
+    if req.train_end:
+        hp["train_end"] = req.train_end
+    if req.xgb_run_id:
+        hp["xgb_run_id"] = req.xgb_run_id
+    if req.lstm_run_id:
+        hp["lstm_run_id"] = req.lstm_run_id
+    train_task.delay(run_id, req.data_job_id, req.algorithm, hp)
     return RunResponse(run_id=run_id, algorithm=req.algorithm, status="pending")
 
 
@@ -60,6 +69,8 @@ def list_runs():
             model_path=r.model_path,
             metrics=r.metrics_json,
             error=r.error,
+            published=bool(r.published) if r.published is not None else False,
+            market=r.market,
         )
         for r in runs
     ]
@@ -88,3 +99,52 @@ def get_run(run_id: str):
 @router.get("/agents")
 def list_agents():
     return {"agents": finrl_wrapper.get_agents()}
+
+
+@router.post("/runs/{run_id}/publish")
+def publish_run(run_id: str):
+    db = SessionLocal()
+    run = db.query(Run).filter(Run.id == run_id).first()
+    if not run:
+        db.close()
+        raise HTTPException(status_code=404, detail="Run not found")
+    if run.status != "done":
+        db.close()
+        raise HTTPException(status_code=400, detail="Only completed runs can be published")
+    run.published = True
+    run.updated_at = datetime.utcnow()
+    db.commit()
+    db.close()
+    return {"run_id": run_id, "published": True}
+
+
+@router.post("/runs/{run_id}/unpublish")
+def unpublish_run(run_id: str):
+    db = SessionLocal()
+    run = db.query(Run).filter(Run.id == run_id).first()
+    if not run:
+        db.close()
+        raise HTTPException(status_code=404, detail="Run not found")
+    run.published = False
+    run.updated_at = datetime.utcnow()
+    db.commit()
+    db.close()
+    return {"run_id": run_id, "published": False}
+
+
+@router.get("/runs/published")
+def list_published_runs():
+    db = SessionLocal()
+    runs = db.query(Run).filter(Run.published == True, Run.status == "done").order_by(Run.created_at.desc()).all()
+    db.close()
+    return [
+        RunResponse(
+            run_id=r.id,
+            algorithm=r.algorithm,
+            status=r.status,
+            created_at=str(r.created_at),
+            model_path=r.model_path,
+            metrics=r.metrics_json,
+        )
+        for r in runs
+    ]

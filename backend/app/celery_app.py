@@ -5,7 +5,12 @@ celery_app = Celery(
     "finrl_worker",
     broker=settings.redis_url,
     backend=settings.redis_url,
-    include=["app.tasks.data_tasks", "app.tasks.train_tasks", "app.tasks.backtest_tasks"]
+    include=[
+        "app.tasks.data_tasks",
+        "app.tasks.train_tasks",
+        "app.tasks.backtest_tasks",
+        "app.tasks.ml_tasks",
+    ]
 )
 
 celery_app.conf.update(

@@ -74,6 +74,24 @@ def preview(job_id: str, n: int = 20):
     return {"job_id": job_id, "rows": rows, "count": len(rows)}
 
 
+@router.get("/jobs")
+def list_jobs():
+    """List all data download jobs."""
+    db = SessionLocal()
+    jobs = db.query(Job).filter(Job.type == "data").order_by(Job.created_at.desc()).all()
+    db.close()
+    return [
+        JobStatusResponse(
+            job_id=j.id,
+            status=j.status,
+            error=j.error,
+            result_path=j.result_path,
+            meta=j.meta,
+        )
+        for j in jobs
+    ]
+
+
 @router.get("/indicators")
 def indicators():
     return {"indicators": finrl_wrapper.get_indicators()}
