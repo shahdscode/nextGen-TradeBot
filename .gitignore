@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# Environment & secrets
+.env
+.env.local
+backend/.env
+mobile/.env
+
+# Node
+node_modules/
+frontend/dist/
+mobile/.expo/
+mobile/dist/
+
+# Expo / React Native generated native projects (recreate with `npx expo prebuild`)
+mobile/ios/
+mobile/android/
+
+# Runtime data (datasets, models, DB — keep locally, do not commit)
+data/
+backend/data/
+*.db
+finrl.db
+
+# OS & editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp
+
+# Logs & temp
+*.log
+.logs/
+/tmp/
+.expo/

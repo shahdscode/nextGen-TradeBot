@@ -1,0 +1,48 @@
+{
+  "expo": {
+    "name": "NextGen TradeBot",
+    "slug": "nextgen-tradebot",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "splash": {
+      "image": "./assets/splash.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#0F172A"
+    },
+    "scheme": "nextgen-tradebot",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.nextgentradebot.app",
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsArbitraryLoads": true,
+          "NSAllowsLocalNetworking": true
+        },
+        "NSLocalNetworkUsageDescription": "NextGen TradeBot needs local network access to load the app from your development server.",
+        "NSBonjourServices": ["_expo._tcp", "_metro._tcp"]
+      }
+    },
+    "android": {
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#0F172A"
+      },
+      "package": "com.nextgentradebot.app"
+    },
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+    "plugins": [
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "usesCleartextTraffic": true
+          }
+        }
+      ]
+    ]
+  }
+}
