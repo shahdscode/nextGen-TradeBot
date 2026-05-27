@@ -1,26 +1,65 @@
-import { Routes, Route } from 'react-router-dom'
-import Layout from './components/Layout'
-import ErrorBoundary from './components/ErrorBoundary'
-import DashboardPage    from './pages/DashboardPage'
-import DataPage         from './pages/DataPage'
-import TrainingPage     from './pages/TrainingPage'
-import BacktestPage     from './pages/BacktestPage'
-import ComparePage      from './pages/ComparePage'
-import PaperTradingPage from './pages/PaperTradingPage'
+import { Routes, Route, Navigate } from 'react-router-dom'
+import { AuthProvider } from './context/authContext'
+import Layout from './components/layout'
+import ErrorBoundary from './components/errorBoundary'
+import ProtectedRoute from './components/protectedRoute'
+
+// Auth
+import LoginPage from './pages/loginPage'
+
+// Admin pages
+import DashboardPage    from './pages/dashboardPage'
+import DataPage         from './pages/dataPage'
+import TrainingPage     from './pages/trainingPage'
+import MLTrainingPage   from './pages/mlTrainingPage'
+import BacktestPage     from './pages/backtestPage'
+import ComparePage      from './pages/comparePage'
+import PublishPage      from './pages/publishPage'
+import PaperTradingPage from './pages/paperTradingPage'
+
+// User pages
+import SignalsPage      from './pages/signalsPage'
+import MarketPage       from './pages/marketPage'
+import LeaderboardPage  from './pages/leaderboardPage'
+import SimulatorPage    from './pages/simulatorPage'
 
 export default function App() {
   return (
-    <ErrorBoundary>
-      <Routes>
-        <Route path="/" element={<Layout />}>
-          <Route index                 element={<DashboardPage />} />
-          <Route path="data"           element={<DataPage />} />
-          <Route path="train"          element={<TrainingPage />} />
-          <Route path="backtest"       element={<BacktestPage />} />
-          <Route path="compare"        element={<ComparePage />} />
-          <Route path="paper-trading"  element={<PaperTradingPage />} />
-        </Route>
-      </Routes>
-    </ErrorBoundary>
+    <AuthProvider>
+      <ErrorBoundary>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+
+          <Route path="/" element={
+            <ProtectedRoute>
+              <Layout />
+            </ProtectedRoute>
+          }>
+            {/* Admin routes */}
+            <Route index element={
+              <ProtectedRoute adminOnly>
+                <DashboardPage />
+              </ProtectedRoute>
+            } />
+            <Route path="data" element={<ProtectedRoute adminOnly><DataPage /></ProtectedRoute>} />
+            <Route path="train" element={<ProtectedRoute adminOnly><TrainingPage /></ProtectedRoute>} />
+            <Route path="ml-train" element={<ProtectedRoute adminOnly><MLTrainingPage /></ProtectedRoute>} />
+            <Route path="backtest" element={<ProtectedRoute adminOnly><BacktestPage /></ProtectedRoute>} />
+            <Route path="compare" element={<ProtectedRoute adminOnly><ComparePage /></ProtectedRoute>} />
+            <Route path="publish" element={<ProtectedRoute adminOnly><PublishPage /></ProtectedRoute>} />
+            <Route path="paper-trading" element={<ProtectedRoute adminOnly><PaperTradingPage /></ProtectedRoute>} />
+
+            {/* User routes — accessible to all authenticated users */}
+            <Route path="signals" element={<SignalsPage />} />
+            <Route path="market" element={<MarketPage />} />
+            <Route path="leaderboard" element={<LeaderboardPage />} />
+            <Route path="simulator" element={<SimulatorPage />} />
+          </Route>
+
+          {/* Catch-all: redirect to login */}
+          <Route path="*" element={<Navigate to="/login" replace />} />
+        </Routes>
+      </ErrorBoundary>
+    </AuthProvider>
   )
 }

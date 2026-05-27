@@ -2,16 +2,16 @@ import { useState, useEffect } from 'react'
 import Select from 'react-select'
 import toast from 'react-hot-toast'
 import client from '../api/client'
-import JobStatusBadge from '../components/JobStatusBadge'
-import { CardSkeleton, TableSkeleton } from '../components/Skeleton'
+import JobStatusBadge from '../components/jobStatusBadge'
+import { CardSkeleton, TableSkeleton } from '../components/skeleton'
 
-const SOURCE_OPTIONS = [
+const sourceOptions = [
   { value: 'yahoo', label: 'Yahoo Finance (free)' },
   { value: 'alpaca', label: 'Alpaca Markets (requires API key)' },
   { value: 'mt5', label: 'MT5 Demo Gateway (requires API key)' },
 ]
 
-const MT5_TIMEFRAME_OPTIONS = [
+const mt5TimeframeOptions = [
   { value: 'M1', label: 'M1' },
   { value: 'M5', label: 'M5' },
   { value: 'M15', label: 'M15' },
@@ -26,9 +26,10 @@ export default function DataPage() {
   const [selectedTickers, setSelectedTickers] = useState([])
   const [loadingInfo, setLoadingInfo] = useState(true)
   const [startDate, setStartDate] = useState('2020-01-01')
-  const [endDate, setEndDate] = useState('2023-12-31')
-  const [source, setSource] = useState(SOURCE_OPTIONS[0])
-  const [mt5Timeframe, setMt5Timeframe] = useState(MT5_TIMEFRAME_OPTIONS[2])
+  const [endDate, setEndDate] = useState('2025-12-31')
+  const [recommendedTickers, setRecommendedTickers] = useState([])
+  const [source, setSource] = useState(sourceOptions[0])
+  const [mt5Timeframe, setMt5Timeframe] = useState(mt5TimeframeOptions[2])
   const [jobId, setJobId] = useState(null)
   const [jobStatus, setJobStatus] = useState(null)
   const [submitting, setSubmitting] = useState(false)
@@ -50,25 +51,50 @@ export default function DataPage() {
       console.log('Tickers by source:', tickersBySource)
       setAllTickersBySource(tickersBySource)
       
-      // Initialize with yahoo tickers
-      const initialTickers = (tickersBySource.yahoo || []).slice(0, 5)
-      const opts = initialTickers.map((t) => ({ value: t, label: t }))
-      setSelectedTickers(opts)
+      // Default: research preset tickers when available
+      const yahooList = tickersBySource.yahoo || []
+      const presetList = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'SPY', 'QQQ', 'XLF', 'XLE', 'JPM', 'JNJ']
+      const picked = presetList.filter((t) => yahooList.includes(t))
+      const initialTickers = picked.length >= 3 ? picked : yahooList.slice(0, 8)
+      setSelectedTickers(initialTickers.map((t) => ({ value: t, label: t })))
     }).catch((err) => {
       console.error('Failed to fetch /api/info:', err)
       toast.error('Failed to load tickers')
     }).finally(() => {
       setLoadingInfo(false)
     })
+    client.get('/api/research/walk-forward-presets')
+      .then((r) => {
+        setRecommendedTickers(r.data.recommended_tickers || [])
+        const dl = r.data.presets?.research_v1?.data_download
+        if (dl) {
+          setStartDate(dl.start_date)
+          setEndDate(dl.end_date)
+        }
+      })
+      .catch(() => {})
   }, [])
+
+  const applyRecommendedTickers = () => {
+    if (!recommendedTickers.length || !source?.value) return
+    const list = allTickersBySource[source.value] || []
+    const opts = recommendedTickers
+      .filter((t) => list.includes(t))
+      .map((t) => ({ value: t, label: t }))
+    if (opts.length) {
+      setSelectedTickers(opts)
+      toast.success(`Selected ${opts.length} tickers (mega-cap + ETFs)`)
+    }
+  }
 
   useEffect(() => {
     if (!source?.value || !allTickersBySource[source.value]) return
-    // Update selected tickers when source changes
     const sourceTickersArray = allTickersBySource[source.value] || []
-    const opts = sourceTickersArray.slice(0, 5).map((t) => ({ value: t, label: t }))
-    setSelectedTickers(opts)
-  }, [source, allTickersBySource])
+    const presetList = recommendedTickers.length ? recommendedTickers : ['AAPL', 'MSFT', 'GOOGL', 'SPY', 'QQQ']
+    const picked = presetList.filter((t) => sourceTickersArray.includes(t))
+    const list = picked.length >= 3 ? picked : sourceTickersArray.slice(0, 8)
+    setSelectedTickers(list.map((t) => ({ value: t, label: t })))
+  }, [source, allTickersBySource, recommendedTickers])
 
   // Poll job status
   useEffect(() => {
@@ -144,6 +170,15 @@ export default function DataPage() {
             placeholder="Search tickers..."
             className="text-sm"
           />
+          {recommendedTickers.length > 0 && (
+            <button
+              type="button"
+              onClick={applyRecommendedTickers}
+              className="mt-2 text-xs text-blue-600 hover:underline"
+            >
+              Use research preset (AAPL, MSFT, GOOGL, SPY, QQQ, …)
+            </button>
+          )}
         </div>
 
         <div className="grid grid-cols-2 gap-4">
@@ -170,7 +205,7 @@ export default function DataPage() {
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">Data source</label>
           <Select
-            options={SOURCE_OPTIONS}
+            options={sourceOptions}
             value={source}
             onChange={setSource}
             className="text-sm"
@@ -184,7 +219,7 @@ export default function DataPage() {
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">MT5 timeframe</label>
             <Select
-              options={MT5_TIMEFRAME_OPTIONS}
+              options={mt5TimeframeOptions}
               value={mt5Timeframe}
               onChange={setMt5Timeframe}
               className="text-sm"

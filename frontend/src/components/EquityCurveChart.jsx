@@ -4,7 +4,7 @@ import {
   Scatter, ScatterChart,
 } from 'recharts'
 
-const AGENT_COLORS = ['#2563eb', '#16a34a', '#dc2626', '#d97706']
+const agentColors = ['#2563eb', '#16a34a', '#dc2626', '#d97706']
 
 const BuyDot = (props) => {
   const { cx, cy } = props
@@ -179,7 +179,7 @@ export default function EquityCurveChart({ curves = [], benchmark = null, showTr
               key={c.label}
               type="monotone"
               dataKey={c.label}
-              stroke={AGENT_COLORS[i % AGENT_COLORS.length]}
+              stroke={agentColors[i % agentColors.length]}
               dot={false}
               strokeWidth={2}
               connectNulls

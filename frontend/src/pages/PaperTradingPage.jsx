@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import client from '../api/client'
-import { CardSkeleton } from '../components/Skeleton'
+import { CardSkeleton } from '../components/skeleton'
 
 export default function PaperTradingPage() {
   const [status, setStatus] = useState(null)

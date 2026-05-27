@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import client from '../api/client'
-import JobStatusBadge from '../components/JobStatusBadge'
-import RewardCurveChart from '../components/RewardCurveChart'
-import { ChartSkeleton } from '../components/Skeleton'
+import JobStatusBadge from '../components/jobStatusBadge'
+import RewardCurveChart from '../components/rewardCurveChart'
+import { ChartSkeleton } from '../components/skeleton'
 
 export default function TrainingPage() {
   const [agents, setAgents] = useState({})
@@ -12,9 +12,16 @@ export default function TrainingPage() {
   const [selectedAlgo, setSelectedAlgo] = useState('ppo')
   const [hyperparams, setHyperparams] = useState({})
   const [dataJobId, setDataJobId] = useState('')
+  const [xgbRunId, setXgbRunId] = useState('')
+  const [lstmRunId, setLstmRunId] = useState('')
+  const [trainStart, setTrainStart] = useState('2020-01-01')
+  const [trainEnd, setTrainEnd] = useState('2022-12-31')
+  const [presets, setPresets] = useState({})
   const [showHyperparams, setShowHyperparams] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [activeRun, setActiveRun] = useState(null)
+  const [pipelineStatus, setPipelineStatus] = useState(null)
+  const [pipelineBusy, setPipelineBusy] = useState(false)
 
   useEffect(() => {
     client.get('/api/info').then((r) => {
@@ -24,6 +31,9 @@ export default function TrainingPage() {
       setHyperparams(r.data.agents[algo]?.default_hyperparams || {})
     })
     client.get('/api/train/runs').then((r) => setJobs(r.data))
+    client.get('/api/research/walk-forward-presets')
+      .then((r) => setPresets(r.data.presets || {}))
+      .catch(() => {})
   }, [])
 
   // When algo changes, reset hyperparams to defaults
@@ -51,14 +61,76 @@ export default function TrainingPage() {
     return () => clearInterval(timer)
   }, [activeRun])
 
+  const refreshPipeline = async () => {
+    if (!dataJobId.trim()) return
+    try {
+      const r = await client.get(`/api/research/alpha-pipeline/status/${dataJobId.trim()}`)
+      setPipelineStatus(r.data)
+      if (r.data.primary_xgb_run_id && !xgbRunId) {
+        setXgbRunId(r.data.primary_xgb_run_id)
+      }
+    } catch (e) {
+      setPipelineStatus(null)
+      if (e.response?.status === 404) {
+        toast.error('Alpha pipeline API not found — restart backend: ./scripts/start-all.sh')
+      }
+    }
+  }
+
+  const runAlphaPipeline = async () => {
+    if (!dataJobId.trim()) return toast.error('Paste a Data Job ID first')
+    setPipelineBusy(true)
+    try {
+      const v = await client.post('/api/research/alpha-pipeline/validate', { data_job_id: dataJobId.trim() })
+      if (!v.data.ok) {
+        toast.error(v.data.issues?.[0] || 'Data validation failed — fix on Data page')
+        return
+      }
+      await client.post('/api/research/alpha-pipeline/xgb-batch', {
+        data_job_id: dataJobId.trim(),
+        n_trials: 25,
+      })
+      toast.success('XGB batch queued — wait for ML Train runs, then Start training')
+      const preset = v.data.preset?.train
+      if (preset) {
+        setTrainStart(preset.start)
+        setTrainEnd(preset.end)
+      }
+      await refreshPipeline()
+    } catch (e) {
+      if (e.response?.status === 404) {
+        toast.error('Alpha pipeline not on API — run: ./scripts/stop-all.sh && ./scripts/start-all.sh')
+      }
+    } finally {
+      setPipelineBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!dataJobId.trim()) return
+    refreshPipeline()
+    const t = setInterval(refreshPipeline, 8000)
+    return () => clearInterval(t)
+  }, [dataJobId])
+
   const handleSubmit = async () => {
     if (!dataJobId.trim()) return toast.error('Paste a Data Job ID first')
+    if (selectedAlgo === 'ppo' && pipelineStatus && !pipelineStatus.ready_for_ppo) {
+      const ok = window.confirm(
+        'XGB alpha not ready yet. Train anyway? (PPO works best after XGB batch completes.)'
+      )
+      if (!ok) return
+    }
     setSubmitting(true)
     try {
       const r = await client.post('/api/train', {
         data_job_id: dataJobId.trim(),
         algorithm: selectedAlgo,
         hyperparams,
+        train_start: trainStart,
+        train_end: trainEnd,
+        ...(xgbRunId.trim() ? { xgb_run_id: xgbRunId.trim() } : {}),
+        ...(lstmRunId.trim() ? { lstm_run_id: lstmRunId.trim() } : {}),
       })
       const run = { run_id: r.data.run_id, algorithm: selectedAlgo, status: 'pending' }
       setActiveRun(run)
@@ -72,11 +144,54 @@ export default function TrainingPage() {
   return (
     <div>
       <h1 className="text-2xl font-semibold text-gray-900 mb-1">Train</h1>
-      <p className="text-sm text-gray-500 mb-6">Configure and launch a training run</p>
+      <p className="text-sm text-gray-500 mb-2">Configure and launch a training run</p>
+      {selectedAlgo === 'ppo' && (
+        <p className="text-xs text-amber-800 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2 mb-6">
+          Alpha-first PPO: reward = your return − S&amp;P 500 − best baseline penalty.
+          28+ features + ML confidence. Default 400k steps, curriculum 2020→2023.
+          Train XGBoost first, paste run ID for hybrid alpha.
+        </p>
+      )}
+      {selectedAlgo !== 'ppo' && <div className="mb-6" />}
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
         {/* Config form */}
         <div className="bg-white border border-gray-200 rounded-xl p-6 space-y-5">
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-1">Train window (walk-forward)</label>
+            <div className="flex flex-wrap gap-2 mb-2">
+              {Object.entries(presets).map(([key, p]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => {
+                    setTrainStart(p.train.start)
+                    setTrainEnd(p.train.end)
+                    toast.success('Train window set')
+                  }}
+                  className="px-2 py-1 text-xs rounded-full bg-gray-100 hover:bg-gray-200"
+                >
+                  {key}
+                </button>
+              ))}
+            </div>
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                type="date"
+                value={trainStart}
+                onChange={(e) => setTrainStart(e.target.value)}
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm"
+              />
+              <input
+                type="date"
+                value={trainEnd}
+                onChange={(e) => setTrainEnd(e.target.value)}
+                className="border border-gray-300 rounded-lg px-3 py-2 text-sm"
+              />
+            </div>
+            <p className="text-xs text-gray-400 mt-1">Default: train 2020–2022, backtest on 2024–2025 holdout</p>
+          </div>
+
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">Data Job ID</label>
             <input
@@ -90,6 +205,58 @@ export default function TrainingPage() {
               Go to <Link to="/data" className="text-blue-600 hover:underline">Data page</Link> to download data first
             </p>
           </div>
+
+          {dataJobId.trim() && (
+            <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg text-xs space-y-2">
+              <div className="flex items-center justify-between">
+                <span className="font-medium text-emerald-900">Alpha pipeline</span>
+                <button type="button" onClick={refreshPipeline} className="text-emerald-700 hover:underline">Refresh</button>
+              </div>
+              {pipelineStatus ? (
+                <p className="text-emerald-800">
+                  XGB done: {pipelineStatus.xgb_done} · pending: {pipelineStatus.xgb_pending} ·
+                  quality (AUC≥0.52): {pipelineStatus.xgb_quality_ok} ·
+                  {pipelineStatus.ready_for_ppo ? ' ✓ Ready for PPO' : ' ⏳ Train XGB first'}
+                </p>
+              ) : (
+                <p className="text-emerald-700">Validate data and queue XGB for all tickers.</p>
+              )}
+              <button
+                type="button"
+                onClick={runAlphaPipeline}
+                disabled={pipelineBusy}
+                className="w-full py-2 bg-emerald-700 text-white rounded-lg hover:bg-emerald-800 disabled:opacity-50"
+              >
+                {pipelineBusy ? 'Running…' : '1. Validate + queue XGB (all tickers)'}
+              </button>
+            </div>
+          )}
+
+          {selectedAlgo === 'ppo' && (
+            <div className="grid grid-cols-1 gap-3 p-3 bg-slate-50 border border-slate-200 rounded-lg">
+              <p className="text-xs font-medium text-slate-700">Hybrid alpha (optional)</p>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">XGBoost run ID</label>
+                <input
+                  type="text"
+                  value={xgbRunId}
+                  onChange={(e) => setXgbRunId(e.target.value)}
+                  placeholder="From ML Train page — directional probability → PPO state"
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                />
+              </div>
+              <div>
+                <label className="text-xs text-gray-500 mb-1 block">LSTM run ID (optional)</label>
+                <input
+                  type="text"
+                  value={lstmRunId}
+                  onChange={(e) => setLstmRunId(e.target.value)}
+                  placeholder="Optional second alpha signal"
+                  className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm"
+                />
+              </div>
+            </div>
+          )}
 
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-2">Algorithm</label>
