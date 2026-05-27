@@ -1,0 +1,127 @@
+import uuid
+from datetime import datetime
+from app.celery_app import celery_app
+from app.database import SessionLocal, Run, Job
+
+
+@celery_app.task(bind=True, name="ml_tasks.train_xgboost")
+def train_xgboost_task(self, run_id: str, data_job_id: str, ticker: str, n_trials: int = 30):
+    from app.services.xgboost_service import train_xgboost
+    db = SessionLocal()
+    try:
+        run = db.query(Run).filter(Run.id == run_id).first()
+        run.status = "running"
+        run.updated_at = datetime.utcnow()
+        db.commit()
+
+        result = train_xgboost(run_id=run_id, data_job_id=data_job_id, ticker=ticker, n_trials=n_trials)
+
+        run.status = "done"
+        run.model_path = result["model_path"]
+        run.metrics_json = result["metrics"]
+        run.updated_at = datetime.utcnow()
+        db.commit()
+        return {"status": "done", "model_path": result["model_path"]}
+    except Exception as e:
+        run = db.query(Run).filter(Run.id == run_id).first()
+        run.status = "failed"
+        run.error = str(e)
+        run.updated_at = datetime.utcnow()
+        db.commit()
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name="ml_tasks.train_lstm")
+def train_lstm_task(self, run_id: str, data_job_id: str, ticker: str, epochs: int = 30):
+    from app.services.lstm_service import train_lstm
+    db = SessionLocal()
+    try:
+        run = db.query(Run).filter(Run.id == run_id).first()
+        run.status = "running"
+        run.updated_at = datetime.utcnow()
+        db.commit()
+
+        result = train_lstm(run_id=run_id, data_job_id=data_job_id, ticker=ticker, epochs=epochs)
+
+        run.status = "done"
+        run.model_path = result["model_path"]
+        run.metrics_json = result["metrics"]
+        run.updated_at = datetime.utcnow()
+        db.commit()
+        return {"status": "done", "model_path": result["model_path"]}
+    except Exception as e:
+        run = db.query(Run).filter(Run.id == run_id).first()
+        run.status = "failed"
+        run.error = str(e)
+        run.updated_at = datetime.utcnow()
+        db.commit()
+        raise
+    finally:
+        db.close()
+
+
+@celery_app.task(bind=True, name="ml_tasks.generate_signals")
+def generate_signals_task(self, job_id: str, tickers: list, market: str = "us",
+                           xgb_run_id: str = None, lstm_run_id: str = None,
+                           ppo_run_id: str = None, data_job_id: str = None):
+    import pandas as pd
+    from pathlib import Path
+    from app.config import settings
+    from app.services.fusion_service import generate_full_signal
+
+    db = SessionLocal()
+    try:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        job.status = "running"
+        job.updated_at = datetime.utcnow()
+        db.commit()
+
+        # Resolve model paths from run IDs
+        xgb_model_path = _get_model_path(db, xgb_run_id)
+        lstm_model_path = _get_model_path(db, lstm_run_id)
+
+        # Load data if available
+        df = None
+        if data_job_id:
+            data_path = Path(settings.data_dir) / data_job_id / "data.csv"
+            if data_path.exists():
+                df = pd.read_csv(data_path)
+
+        cards = []
+        for ticker in tickers:
+            try:
+                card = generate_full_signal(
+                    ticker=ticker,
+                    market=market,
+                    df=df,
+                    xgb_model_path=xgb_model_path,
+                    lstm_model_path=lstm_model_path,
+                    ppo_run_id=ppo_run_id,
+                )
+                cards.append(card)
+            except Exception as e:
+                cards.append({"ticker": ticker, "error": str(e)})
+
+        job.status = "done"
+        job.meta = {"signals_generated": len(cards), "tickers": tickers}
+        job.updated_at = datetime.utcnow()
+        db.commit()
+        return {"status": "done", "count": len(cards)}
+    except Exception as e:
+        job = db.query(Job).filter(Job.id == job_id).first()
+        job.status = "failed"
+        job.error = str(e)
+        job.updated_at = datetime.utcnow()
+        db.commit()
+        raise
+    finally:
+        db.close()
+
+
+def _get_model_path(db, run_id: str):
+    if not run_id:
+        return None
+    run = db.query(Run).filter(Run.id == run_id).first()
+    return run.model_path if run else None
