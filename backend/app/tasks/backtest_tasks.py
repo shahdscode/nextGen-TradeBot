@@ -5,8 +5,18 @@ from datetime import datetime
 
 
 @celery_app.task(bind=True, name="backtest_tasks.run")
-def backtest_task(self, backtest_id: str, run_id: str, test_start: str, test_end: str,
-                  initial_capital: float = 1_000_000.0):
+def backtest_task(
+    self,
+    backtest_id: str,
+    run_id: str,
+    test_start: str,
+    test_end: str,
+    initial_capital: float = 1_000_000.0,
+    commission_pct: float = 0.001,
+    slippage_pct: float = 0.001,
+    max_position_pct: float = 0.20,
+    cooldown_days: int = 5,
+):
     db = SessionLocal()
     try:
         bt = db.query(Backtest).filter(Backtest.id == backtest_id).first()
@@ -20,6 +30,10 @@ def backtest_task(self, backtest_id: str, run_id: str, test_start: str, test_end
             test_start=test_start,
             test_end=test_end,
             initial_capital=initial_capital,
+            commission_pct=commission_pct,
+            slippage_pct=slippage_pct,
+            max_position_pct=max_position_pct,
+            cooldown_days=cooldown_days,
         )
 
         bt.status = "done"
