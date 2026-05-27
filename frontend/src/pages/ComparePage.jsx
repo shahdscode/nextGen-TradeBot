@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import toast from 'react-hot-toast'
 import client from '../api/client'
-import EquityCurveChart from '../components/EquityCurveChart'
-import AgentCompareTable from '../components/AgentCompareTable'
-import { ChartSkeleton, TableSkeleton } from '../components/Skeleton'
+import EquityCurveChart from '../components/equityCurveChart'
+import AgentCompareTable from '../components/agentCompareTable'
+import { ChartSkeleton, TableSkeleton } from '../components/skeleton'
 
 export default function ComparePage() {
   const [backtests, setBacktests] = useState([])
@@ -22,7 +22,7 @@ export default function ComparePage() {
     setSelected((prev) => {
       const exists = prev.find((b) => b.backtest_id === bt.backtest_id)
       if (exists) return prev.filter((b) => b.backtest_id !== bt.backtest_id)
-      if (prev.length >= 4) { toast.error('Max 4 runs at once'); return prev }
+      if (prev.length >= 8) { toast.error('Max 8 runs at once'); return prev }
       return [...prev, bt]
     })
   }
@@ -51,7 +51,7 @@ export default function ComparePage() {
   return (
     <div>
       <h1 className="text-2xl font-semibold text-gray-900 mb-1">Compare</h1>
-      <p className="text-sm text-gray-500 mb-6">Overlay up to 4 backtest results on one chart</p>
+      <p className="text-sm text-gray-500 mb-6">Overlay up to 8 backtest results on one chart</p>
 
       {/* Selection table */}
       <div className="bg-white border border-gray-200 rounded-xl overflow-hidden mb-6">
