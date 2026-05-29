@@ -120,6 +120,24 @@ class PaperSession(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class ModelPerformanceScore(Base):
+    """
+    Daily EWMA performance scores for the adaptive weight tracker.
+
+    One row per (date, model_key).  The EWMA score is updated after each
+    trading day once actual 5-day returns are known.  Fusion weights are
+    derived from these scores by ewma_tracker_service.get_current_weights().
+    """
+    __tablename__ = "model_performance_scores"
+    id           = Column(String, primary_key=True)
+    date         = Column(String, nullable=False)          # "YYYY-MM-DD"
+    model_key    = Column(String, nullable=False)          # "xgboost" | "lstm" | "ppo" | …
+    ewma_score   = Column(Float,  nullable=False)          # current EWMA value 0-1
+    daily_correct = Column(Float, nullable=True)           # 1.0 / 0.0 / 0.5
+    weight        = Column(Float, nullable=True)           # normalised fusion weight
+    created_at   = Column(DateTime, default=datetime.utcnow)
+
+
 def _add_column_if_missing(conn, table: str, col_def: str):
     try:
         conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_def}"))
@@ -136,3 +154,5 @@ def create_tables():
         _add_column_if_missing(conn, "runs", "published INTEGER DEFAULT 0")
         _add_column_if_missing(conn, "runs", "market TEXT DEFAULT 'us'")
         _add_column_if_missing(conn, "backtests", "initial_capital REAL DEFAULT 1000000.0")
+    # NEW: model_performance_scores table (created via create_all above if missing)
+    ModelPerformanceScore.__table__.create(bind=engine, checkfirst=True)

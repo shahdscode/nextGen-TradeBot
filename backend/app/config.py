@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     data_dir: str = "./data/datasets"
     models_dir: str = "./data/models"
     results_dir: str = "./data/results"
+    oof_dir: str = "./data/oof"
     alpaca_api_key: str = ""
     alpaca_api_secret: str = ""
     alpaca_base_url: str = "https://paper-api.alpaca.markets"
@@ -53,5 +54,5 @@ if settings.jwt_secret_key == _DEFAULT_JWT_SECRET:
     warnings.warn(_msg, stacklevel=2)
     logger.warning("JWT_SECRET_KEY is using the insecure default — set JWT_SECRET_KEY in .env")
 
-for d in [settings.data_dir, settings.models_dir, settings.results_dir]:
+for d in [settings.data_dir, settings.models_dir, settings.results_dir, settings.oof_dir]:
     Path(d).mkdir(parents=True, exist_ok=True)
