@@ -268,3 +268,31 @@ def _generate_synthetic_market_data(
 def get_preview(csv_path: str, n: int = 20) -> list:
     df = pd.read_csv(csv_path)
     return df.head(n).fillna(0).to_dict(orient="records")
+
+
+def download_and_prepare(
+    ticker: str,
+    start_date: str,
+    end_date: str,
+    source: str = "yahoo",
+) -> str:
+    """
+    Convenience wrapper for team scripts — download one ticker and save to data_dir.
+
+    Returns the path to the saved CSV.
+
+    Usage (Person 1 script)
+    -----------------------
+        from app.services.data_service import download_and_prepare
+        download_and_prepare('AAPL', '2020-01-01', '2024-12-31')
+    """
+    import uuid
+    job_id = str(uuid.uuid4())[:8]
+    out_path = download_data(
+        job_id=job_id,
+        tickers=[ticker],
+        start_date=start_date,
+        end_date=end_date,
+        source=source,
+    )
+    return out_path

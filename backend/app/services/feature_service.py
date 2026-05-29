@@ -110,7 +110,7 @@ def add_cross_sectional_rank(df: pd.DataFrame) -> pd.DataFrame:
 
 def build_features(
     df: pd.DataFrame,
-    ticker: str,
+    ticker: Optional[str] = None,
     vix_df: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """
@@ -123,6 +123,8 @@ def build_features(
               'rank_20d_mom' column will already be present; otherwise a
               neutral fallback of 0.5 is used.
     ticker  : ticker symbol to extract (must appear in df['tic']).
+              If None and df contains exactly one unique ticker, that ticker
+              is used automatically.
     vix_df  : output of download_vix() — supply for US tickers.
               Pass None for EGX tickers (.CA) to get vix_level=0, vix_zscore=0.
 
@@ -132,6 +134,18 @@ def build_features(
     Last 5 rows are always dropped (5-day forward return unavailable).
     All NaNs are filled with 0.
     """
+    # Auto-detect ticker for single-ticker DataFrames
+    if ticker is None:
+        unique = df["tic"].unique() if "tic" in df.columns else []
+        if len(unique) == 1:
+            ticker = unique[0]
+        elif len(unique) == 0:
+            raise ValueError("build_features: df has no 'tic' column")
+        else:
+            raise ValueError(
+                f"build_features: ticker is required when df has multiple tickers: {list(unique)[:5]}…"
+            )
+
     g = df[df["tic"] == ticker].copy().sort_values("date").reset_index(drop=True)
     if g.empty:
         return g
@@ -307,6 +321,10 @@ def generate_walk_forward_folds(
     logger.info("Generated %d walk-forward folds (train=%dm, test=%dm, leakage guard=5d)",
                 len(folds), train_months, test_months)
     return folds
+
+
+# Convenience alias used in team scripts
+walk_forward_folds = generate_walk_forward_folds
 
 
 def save_fold_definitions(
