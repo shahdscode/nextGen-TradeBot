@@ -35,6 +35,11 @@ CAUSAL_FEATURE_REGISTRY: Dict[str, str] = {
     "obv_zscore":      "cumulative volume direction, z-scored",
     "ema_cross":       "ema12/ema26 from past closes",
     "vol_price_corr":  "rolling corr volume vs |return|",
+    # ── Step 1 feature upgrades ───────────────────────────────────────────────
+    "vix_level":             "VIX index daily close (US only; EGX set to 0.0)",
+    "vix_zscore":            "VIX z-score rolling 20d (US only; EGX set to 0.0)",
+    "price_range_position":  "52-week price position: (close−low252)/(high252−low252)",
+    "rank_20d_mom":          "cross-sectional percentile rank of 20d momentum across all tickers",
 }
 
 FORBIDDEN_COLUMN_SUFFIXES: Set[str] = {"_future", "_next", "_fwd", "_lead", "_t+1"}
