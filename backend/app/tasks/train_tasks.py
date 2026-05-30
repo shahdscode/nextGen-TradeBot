@@ -5,7 +5,8 @@ from datetime import datetime
 
 
 @celery_app.task(bind=True, name="train_tasks.train")
-def train_task(self, run_id: str, data_job_id: str, algorithm: str, hyperparams: dict):
+def train_task(self, run_id: str, data_job_id: str, algorithm: str,
+               hyperparams: dict, market: str = "us"):
     db = SessionLocal()
     try:
         run = db.query(Run).filter(Run.id == run_id).first()
@@ -18,6 +19,7 @@ def train_task(self, run_id: str, data_job_id: str, algorithm: str, hyperparams:
             data_job_id=data_job_id,
             algorithm=algorithm,
             hyperparams=hyperparams,
+            market=market,
         )
 
         run.status = "done"

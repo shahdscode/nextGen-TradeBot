@@ -16,13 +16,27 @@ from app.services.rl_training import RLTrainingConfig, build_training_env
 FINRL_AVAILABLE = finrl_wrapper.FINRL_AVAILABLE
 
 
+_RL_ALGORITHMS = {"ppo", "a2c", "ddpg", "td3", "sac"}
+
+
 def train_agent(
     run_id: str,
     data_job_id: str,
     algorithm: str,
     hyperparams: Optional[Dict[str, Any]] = None,
+    market: str = "us",
 ) -> Dict[str, Any]:
-    """Train a DRL agent. Returns metrics dict."""
+    """
+    Train a DRL agent for any of the 5 supported RL algorithms.
+
+    Parameters
+    ----------
+    algorithm : "ppo" | "a2c" | "ddpg" | "td3" | "sac"
+    market    : "us" | "egx" — stored in metrics for downstream filtering
+    """
+    algorithm = algorithm.lower().strip()
+    if algorithm not in _RL_ALGORITHMS:
+        raise ValueError(f"Unsupported algorithm '{algorithm}'. Choose from: {sorted(_RL_ALGORITHMS)}")
     data_path = Path(settings.data_dir) / data_job_id / "data.csv"
     model_dir = Path(settings.models_dir) / run_id
     model_dir.mkdir(parents=True, exist_ok=True)
@@ -63,8 +77,9 @@ def train_agent(
                 f"test_start ({test_start_check}). Adjust your date ranges."
             )
 
-    # Auto-resolve XGB alpha from same data job when training PPO
-    if algorithm == "ppo" and not xgb_run_id and data_job_id:
+    # Auto-resolve XGB alpha for ALL RL algorithms (not just PPO)
+    # Having XGBoost signal in the state space improves all RL agents.
+    if not xgb_run_id and data_job_id:
         xgb_run_id = pick_primary_xgb_run_id(data_job_id)
 
     train_note = None
@@ -155,27 +170,29 @@ def train_agent(
         train_note = "Synthetic training used because FinRL is unavailable"
 
     metrics = {
-        "reward_curve": reward_curve,
+        "reward_curve":    reward_curve,
         "total_timesteps": total_timesteps,
-        "algorithm": algorithm,
-        "final_reward": reward_curve[-1]["reward"] if reward_curve else 0,
-        "train_window": {"start": train_start, "end": train_end},
-        "price_overlay": price_overlay,
-        "rl_training": rl_cfg.__dict__,
-        "reward_mode": rl_cfg.reward_mode,
+        "algorithm":       algorithm,
+        "market":          market,
+        "model_type":      "rl",
+        "final_reward":    reward_curve[-1]["reward"] if reward_curve else 0,
+        "train_window":    {"start": train_start, "end": train_end},
+        "price_overlay":   price_overlay,
+        "rl_training":     rl_cfg.__dict__,
+        "reward_mode":     rl_cfg.reward_mode,
         "alpha_inputs": {
-            "xgb_run_id": xgb_run_id,
-            "lstm_run_id": lstm_run_id,
+            "xgb_run_id":         xgb_run_id,
+            "lstm_run_id":        lstm_run_id,
             "xgb_runs_by_ticker": best_xgb_run_per_ticker(data_job_id) if data_job_id else {},
-            "feature_count": len(finrl_wrapper.get_indicators(include_rl_extras=True)),
+            "feature_count":      len(finrl_wrapper.get_indicators(include_rl_extras=True)),
         },
         "transaction_costs": {
             "buy_cost_pct": settings.buy_cost_pct,
             "sell_cost_pct": settings.sell_cost_pct,
-            "slippage_bps": settings.slippage_bps,
+            "slippage_bps":  settings.slippage_bps,
         },
     }
-    if algorithm == "ppo" and xgb_run_id:
+    if xgb_run_id:
         metrics["xgb_auto_linked"] = xgb_run_id
     if train_note:
         metrics["note"] = train_note

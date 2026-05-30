@@ -5,7 +5,8 @@ from app.database import SessionLocal, Run, Job
 
 
 @celery_app.task(bind=True, name="ml_tasks.train_xgboost")
-def train_xgboost_task(self, run_id: str, data_job_id: str, ticker: str, n_trials: int = 30):
+def train_xgboost_task(self, run_id: str, data_job_id: str, ticker: str,
+                       n_trials: int = 30, market: str = "us"):
     from app.services.xgboost_service import train_xgboost
     db = SessionLocal()
     try:
@@ -14,7 +15,8 @@ def train_xgboost_task(self, run_id: str, data_job_id: str, ticker: str, n_trial
         run.updated_at = datetime.utcnow()
         db.commit()
 
-        result = train_xgboost(run_id=run_id, data_job_id=data_job_id, ticker=ticker, n_trials=n_trials)
+        result = train_xgboost(run_id=run_id, data_job_id=data_job_id,
+                               ticker=ticker, n_trials=n_trials, market=market)
 
         run.status = "done"
         run.model_path = result["model_path"]
@@ -34,7 +36,8 @@ def train_xgboost_task(self, run_id: str, data_job_id: str, ticker: str, n_trial
 
 
 @celery_app.task(bind=True, name="ml_tasks.train_lstm")
-def train_lstm_task(self, run_id: str, data_job_id: str, ticker: str, epochs: int = 30):
+def train_lstm_task(self, run_id: str, data_job_id: str, ticker: str,
+                    epochs: int = 30, market: str = "us"):
     from app.services.lstm_service import train_lstm
     db = SessionLocal()
     try:
@@ -43,7 +46,8 @@ def train_lstm_task(self, run_id: str, data_job_id: str, ticker: str, epochs: in
         run.updated_at = datetime.utcnow()
         db.commit()
 
-        result = train_lstm(run_id=run_id, data_job_id=data_job_id, ticker=ticker, epochs=epochs)
+        result = train_lstm(run_id=run_id, data_job_id=data_job_id,
+                            ticker=ticker, epochs=epochs, market=market)
 
         run.status = "done"
         run.model_path = result["model_path"]
@@ -78,11 +82,9 @@ def generate_signals_task(self, job_id: str, tickers: list, market: str = "us",
         job.updated_at = datetime.utcnow()
         db.commit()
 
-        # Resolve model paths from run IDs
-        xgb_model_path = _get_model_path(db, xgb_run_id)
+        xgb_model_path  = _get_model_path(db, xgb_run_id)
         lstm_model_path = _get_model_path(db, lstm_run_id)
 
-        # Load data if available
         df = None
         if data_job_id:
             data_path = Path(settings.data_dir) / data_job_id / "data.csv"
