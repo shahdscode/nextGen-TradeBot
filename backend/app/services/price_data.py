@@ -60,11 +60,9 @@ TICKER_ADV_NOTIONAL: dict = {
     "ACGC.CA":   400_000,   # Arab Cotton Ginning
     "ISPH.CA": 1_200_000,   # Integrated Diagnostics Holdings
     "GBCO.CA":   700_000,   # GB Auto
-    "GTHE.CA":   500_000,   # Ghabbour Auto
     "MFPC.CA":   800_000,   # Misr Fertilizers Production Company
-    "ABIS.CA":   400_000,   # Alexandria Spinning
-    "BICO.CA":   300_000,   # Bisco Egypt
     "BTFH.CA":   300_000,   # Biotechnology
+    # GTHE.CA, ABIS.CA, BICO.CA, MNHD.CA removed — delisted
 }
 _DEFAULT_ADV: float     = 100_000_000   # $100 M fallback for unknown US tickers
 _DEFAULT_ADV_EGX: float = 500_000       # ~$500 K fallback for unknown EGX tickers
