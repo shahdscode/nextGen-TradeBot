@@ -13,6 +13,20 @@ class DataDownloadRequest(BaseModel):
     indicators: Optional[List[str]] = None
 
 
+class TickerValidateRequest(BaseModel):
+    source: str
+    tickers: List[str]
+
+
+class TickerValidateResponse(BaseModel):
+    valid: bool
+    source: str
+    tickers: List[str] = []
+    invalid: List[str] = []
+    allowed_count: int = 0
+    message: str = ""
+
+
 class JobStatusResponse(BaseModel):
     job_id: str
     status: str
