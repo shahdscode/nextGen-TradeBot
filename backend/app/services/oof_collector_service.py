@@ -39,6 +39,7 @@ from app.config import settings
 from app.services.feature_service import (
     FEATURE_COLUMNS,
     add_cross_sectional_rank,
+    add_mahalanobis_turbulence,
     build_features,
     download_vix,
     load_fold_definitions,
@@ -66,6 +67,20 @@ _OOF_REQUIRED_COLS = {
 # PUBLIC FILE-PATH API  (one-liner per person)
 # ═══════════════════════════════════════════════════════════════════════════════
 
+def _prepare_df(data_dir: str, vix_df: Optional[pd.DataFrame]) -> tuple:
+    """Load, compute cross-sectional features, return (df, vix_df)."""
+    df = _load_df_from_dir(data_dir)
+    # Mahalanobis turbulence first (replaces per-ticker proxy from download)
+    df = add_mahalanobis_turbulence(df)
+    # Cross-sectional momentum rank
+    df = add_cross_sectional_rank(df)
+    # VIX for US tickers
+    if vix_df is None:
+        dates = pd.to_datetime(df["date"])
+        vix_df = download_vix(str(dates.min().date()), str(dates.max().date()))
+    return df, vix_df
+
+
 def collect_xgb_oof(
     data_dir: str = "data/datasets",
     fold_definitions_path: str = _DEFAULT_FOLD_PATH,
@@ -78,11 +93,7 @@ def collect_xgb_oof(
     Loads data from *data_dir*, trains XGBoost walk-forward, and writes
     out-of-fold predictions to *output_path*.
     """
-    df = _load_df_from_dir(data_dir)
-    df = add_cross_sectional_rank(df)
-    if vix_df is None:
-        dates = pd.to_datetime(df["date"])
-        vix_df = download_vix(str(dates.min().date()), str(dates.max().date()))
+    df, vix_df = _prepare_df(data_dir, vix_df)
     result = _collect_xgb_oof_df(df, fold_definitions_path, vix_df=vix_df)
     save_oof_dataset(result, output_path)
     return result
@@ -99,11 +110,7 @@ def collect_lstm_oof(
 
     Uses the SAME fold_definitions.json as XGBoost — critical for consistency.
     """
-    df = _load_df_from_dir(data_dir)
-    df = add_cross_sectional_rank(df)
-    if vix_df is None:
-        dates = pd.to_datetime(df["date"])
-        vix_df = download_vix(str(dates.min().date()), str(dates.max().date()))
+    df, vix_df = _prepare_df(data_dir, vix_df)
     result = _collect_lstm_oof_df(df, fold_definitions_path, vix_df=vix_df)
     save_oof_dataset(result, output_path)
     return result

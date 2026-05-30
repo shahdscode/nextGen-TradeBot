@@ -280,23 +280,33 @@ def download_and_prepare(
     start_date: str,
     end_date: str,
     source: str = "yahoo",
+    warmup_start: Optional[str] = None,
 ) -> str:
     """
     Convenience wrapper for team scripts — download one ticker and save to data_dir.
 
     Returns the path to the saved CSV.
 
+    WARMUP: Mahalanobis turbulence needs 252 trading days (~1 year) of history
+    before the first training date.  If warmup_start is provided, data is
+    downloaded from that date instead of start_date.  The extra warmup rows
+    are included in the CSV so add_mahalanobis_turbulence() produces valid
+    values from start_date onwards.
+
     Usage (Person 1 script)
     -----------------------
         from app.services.data_service import download_and_prepare
-        download_and_prepare('AAPL', '2020-01-01', '2024-12-31')
+        # Download 2019 data as warmup so turbulence is correct from 2020-01-01:
+        download_and_prepare('AAPL', '2020-01-01', '2024-12-31',
+                             warmup_start='2019-01-01')
     """
     import uuid
     job_id = str(uuid.uuid4())[:8]
+    effective_start = warmup_start if warmup_start else start_date
     out_path = download_data(
         job_id=job_id,
         tickers=[ticker],
-        start_date=start_date,
+        start_date=effective_start,
         end_date=end_date,
         source=source,
     )
