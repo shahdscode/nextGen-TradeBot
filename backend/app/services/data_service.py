@@ -44,38 +44,43 @@ def download_data(
                 indicators=indicators,
             )
         df.to_csv(out_path, index=False)
-    elif source in {"yahoo", "alpaca"}:
-        try:
-            if source == "alpaca" and (not settings.alpaca_api_key or not settings.alpaca_api_secret):
-                raise ValueError("ALPACA_API_KEY and ALPACA_API_SECRET are required for alpaca source")
+    elif source in {"yahoo", "yahoo_egx", "alpaca"}:
+        if source == "alpaca" and (not settings.alpaca_api_key or not settings.alpaca_api_secret):
+            raise ValueError("ALPACA_API_KEY and ALPACA_API_SECRET are required for alpaca source")
 
-            from app.services.price_data import download_yahoo_ohlcv
+        from app.services.price_data import download_yahoo_ohlcv
 
-            df = download_yahoo_ohlcv(
-                tickers=tickers,
-                start_date=start_date,
-                end_date=end_date,
-                indicators=indicators,
-            )
-            if df.empty:
-                raise ValueError("no data is fetched.")
-        except Exception:
-            df = _generate_synthetic_market_data(
-                tickers=tickers,
-                start_date=start_date,
-                end_date=end_date,
-                indicators=indicators,
-            )
-
-        df.to_csv(out_path, index=False)
-    else:
-        df = _generate_synthetic_market_data(
+        df = download_yahoo_ohlcv(
             tickers=tickers,
             start_date=start_date,
             end_date=end_date,
             indicators=indicators,
         )
+
+        if df.empty:
+            raise ValueError(
+                f"yfinance returned no data for {tickers} ({start_date}–{end_date}). "
+                "Check that tickers are valid Yahoo Finance symbols and the date range "
+                "contains trading days."
+            )
+
+        # Warn about partially missing tickers
+        returned  = set(df["tic"].unique())
+        requested = set(t.strip().upper() for t in tickers)
+        missing   = requested - returned
+        if missing:
+            import logging as _log
+            _log.getLogger(__name__).warning(
+                "yfinance did not return data for %s — possibly delisted or unsupported. "
+                "Proceeding with %d/%d tickers.", sorted(missing), len(returned), len(requested)
+            )
+
         df.to_csv(out_path, index=False)
+
+    else:
+        raise ValueError(
+            f"Unknown data source '{source}'. Valid: yahoo, yahoo_egx, alpaca, mt5."
+        )
 
     return out_path
 
