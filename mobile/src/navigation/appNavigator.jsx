@@ -1,7 +1,8 @@
-import { View, Image, ActivityIndicator, StyleSheet } from 'react-native'
+import { View, ActivityIndicator, StyleSheet } from 'react-native'
 import { NavigationContainer } from '@react-navigation/native'
 import { createNativeStackNavigator } from '@react-navigation/native-stack'
 import { createBottomTabNavigator } from '@react-navigation/bottom-tabs'
+import { Ionicons } from '@expo/vector-icons'
 
 import { useAuth } from '../context/authContext'
 import { COLORS } from '../constants/theme'
@@ -17,21 +18,20 @@ const Stack = createNativeStackNavigator()
 const Tab   = createBottomTabNavigator()
 
 const tabIcons = {
-  Home: require('../../assets/tabs/home.png'),
-  Signals: require('../../assets/tabs/signals.png'),
-  Market: require('../../assets/tabs/market.png'),
-  Leaderboard: require('../../assets/tabs/leaderboard.png'),
-  Simulator: require('../../assets/tabs/simulator.png'),
+  Home: 'home-outline',
+  Signals: 'pulse-outline',
+  Market: 'bar-chart-outline',
+  Leaderboard: 'trophy-outline',
+  Simulator: 'flask-outline',
 }
 
 function TabIcon({ label, focused }) {
-  const source = tabIcons[label]
-  if (!source) return null
+  const name = tabIcons[label] || 'ellipse-outline'
   return (
-    <Image
-      source={source}
-      style={[styles.tabIcon, { opacity: focused ? 1 : 0.5 }]}
-      resizeMode="contain"
+    <Ionicons
+      name={name}
+      size={24}
+      color={focused ? COLORS.teal : COLORS.tabInactive}
     />
   )
 }
@@ -100,9 +100,5 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bg,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  tabIcon: {
-    width: 28,
-    height: 28,
   },
 })

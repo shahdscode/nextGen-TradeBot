@@ -20,6 +20,11 @@ loadDotEnv()
 
 module.exports = ({ config }) => ({
   ...config,
+  expo: {
+    ...config.expo,
+    // Classic entry (index.js) — not expo-router's app/ directory
+    entryPoint: './index.js',
+  },
   extra: {
     ...config.extra,
     apiUrl: process.env.EXPO_PUBLIC_API_URL || '',

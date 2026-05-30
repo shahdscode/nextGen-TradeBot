@@ -12,6 +12,8 @@
       "backgroundColor": "#0F172A"
     },
     "scheme": "nextgen-tradebot",
+    "jsEngine": "hermes",
+    "platforms": ["ios", "android"],
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.nextgentradebot.app",

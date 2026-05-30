@@ -26,8 +26,8 @@ free_port() {
 echo "=== Stopping old processes ==="
 free_port "$BACKEND_PORT"
 free_port "$FRONTEND_PORT"
-free_port 8081
 free_port 8082
+# Do not kill :8081 — mobile Expo Metro may be running
 pkill -f "celery -A app.celery_app" 2>/dev/null || true
 sleep 1
 
@@ -79,10 +79,8 @@ echo "  Web UI:   http://127.0.0.1:$FRONTEND_PORT"
 echo "  Login:    admin / admin123"
 echo "  Logs:     $LOG_DIR/"
 echo ""
-echo "  Mobile (NEW terminal):"
-echo "    cd $ROOT/mobile"
-echo "    npm run sync-api-ip && npm run start"
-echo "    Same Wi‑Fi: scan QR in Expo Go (not Camera)"
-echo "    Other Wi‑Fi / mobile data? → npm run sync:ngrok && npm run start:remote"
-echo "    URL: exp://$LAN_IP:8081  API: http://$LAN_IP:$BACKEND_PORT"
+echo "  Mobile (NEW terminal — works on any network):"
+echo "    cd $ROOT/mobile && npm run setup   # once"
+echo "    npm start                          # scan QR in Expo Go"
+echo "  Or: ./scripts/mobile-dev.sh"
 echo "════════════════════════════════════════════════════════════"

@@ -16,6 +16,7 @@ function isPublicTunnelUrl(url) {
     u.includes('loca.lt') ||
     u.includes('ngrok') ||
     u.includes('trycloudflare.com') ||
+    u.includes('cloudflare') ||
     u.includes('localhost.run')
   )
 }
@@ -58,7 +59,7 @@ function getConfiguredApiUrl() {
 
 /**
  * LAN: Mac IP from Expo debugger or .env
- * Remote: public tunnel URL from npm run start:remote (never LAN fallback)
+ * Remote: public tunnel URL from npm start (never LAN fallback)
  */
 export function resolveApiBaseUrl() {
   const configured = getConfiguredApiUrl()
@@ -106,6 +107,8 @@ client.interceptors.request.use(async (config) => {
   }
   if (base.includes('loca.lt')) {
     config.headers['Bypass-Tunnel-Reminder'] = 'true'
+    config.headers['bypass-tunnel-reminder'] = 'true'
+    config.headers['User-Agent'] = 'NextGenTradeBot-Mobile'
   }
   const token = await AsyncStorage.getItem('token')
   if (token) {
@@ -127,9 +130,8 @@ function formatApiError(err) {
     if (isPublicTunnelUrl(base)) {
       return (
         `API returned 404 via tunnel.\n\n` +
-        'Restart remote mode on your Mac:\n' +
-        '  ./scripts/start-all.sh\n' +
-        '  cd mobile && npm run start:remote'
+        'Restart on your Mac:\n' +
+        '  cd mobile && npm start'
       )
     }
     return (
@@ -142,17 +144,15 @@ function formatApiError(err) {
     if (isRemoteApiMode()) {
       return (
         `Cannot reach API at ${base}.\n\n` +
-        'Remote mode:\n' +
-        '• Mac: ./scripts/start-all.sh\n' +
-        '• Mac: cd mobile && npm run start:remote\n' +
-        '• Reload Expo Go after Metro restarts'
+        'On your Mac:\n' +
+        '• cd mobile && npm start\n' +
+        '• Keep terminal open · reload Expo Go'
       )
     }
     return (
       `Cannot reach API at ${base}.\n\n` +
-      'Same Wi‑Fi:\n' +
-      '• ./scripts/start-all.sh\n' +
-      '• cd mobile && npm run sync-api-ip && npm run start'
+      'On your Mac:\n' +
+      '• cd mobile && npm start'
     )
   }
 

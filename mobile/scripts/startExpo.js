@@ -91,6 +91,21 @@ console.log('══════════════════════�
 if (ip && !useTunnel) {
   env.REACT_NATIVE_PACKAGER_HOSTNAME = ip
   env.EXPO_PACKAGER_HOSTNAME = ip
+  env.EXPO_DEV_SERVER_LISTEN_ADDRESS = '0.0.0.0'
+}
+
+try {
+  const fw = require('child_process').execSync(
+    '/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate',
+    { encoding: 'utf8' },
+  )
+  if (!useTunnel && /enabled/i.test(fw)) {
+    console.log('\n  ⚠ macOS Firewall is ON — phones may not connect on LAN.')
+    console.log('     Use: npm run start:remote   OR allow Node in Firewall settings')
+    console.log('     Run: npm run doctor\n')
+  }
+} catch {
+  /* ignore */
 }
 
 const args = [
@@ -98,7 +113,10 @@ const args = [
   'start',
   '--clear',
   '--go',
-  useTunnel ? '--tunnel' : '--lan',
+  '-p',
+  String(port),
+  '--host',
+  useTunnel ? 'tunnel' : 'lan',
 ]
 
 const child = spawn('npx', args, {

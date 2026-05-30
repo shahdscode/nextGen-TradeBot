@@ -1,105 +1,57 @@
 # NextGen TradeBot — Mobile App
 
-React Native app (Expo SDK 54 managed workflow) for the user-facing trading signals experience.
+Expo SDK 54 · React Native · works on **any phone / any network** with one command.
 
-**Stack:** Expo 54 · React Native 0.81 · React 19
-
-## Screens
-
-| Screen | Description |
-|--------|-------------|
-| **Login** | JWT authentication |
-| **Home** | Regime banner + top 3 signals + market movers |
-| **Signals** | Full signal grid with market + action filters |
-| **Market** | Live prices, 3-month chart, news sentiment |
-| **Leaderboard** | Ranked tickers by signal confidence |
-| **Simulator** | Backtest runner with equity curve |
-
-## Prerequisites
-
-- Node.js ≥ 20.19 (required for Expo SDK 54)
-- Expo Go app on your phone (SDK 54 compatible build)
-- Or iOS Simulator / Android Emulator
-
-## Setup
+## Quick start (recommended)
 
 ```bash
 cd mobile
-npm install
+npm run setup    # once: ngrok token + optional cloudflared
+npm start        # auto: backend + API tunnel + Expo QR
 ```
 
-## Configure the API URL
+1. Wait until the terminal shows **Tunnel ready** and the connection box with **Expo URL**.
+2. On your phone: open **Expo Go** (App Store / Play — must support SDK 54).
+3. Scan the QR **inside Expo Go** (not an old screenshot).
+4. Keep the Mac terminal **open** while testing.
+5. Login: `admin` / `admin123`
 
-The app picks your Mac's LAN IP automatically from Expo (same IP as the QR code).
-
-If login shows "Cannot reach API", sync `.env` then restart Expo:
+From repo root:
 
 ```bash
-npm run sync-api-ip
-npm run start
+./scripts/mobile-dev.sh
 ```
 
-Copy `mobile/.env.example` → `mobile/.env` and set `EXPO_PUBLIC_API_URL=http://YOUR_MAC_IP:8002`.
+## What `npm start` does
 
-> **Note:** `localhost` only works on simulators, not on a physical device. Backend must run on port **8002**.
+- Starts the backend on `:8002` if it is not already running
+- Opens a **Cloudflare** API tunnel (`cloudflared`) when installed — much more reliable than LAN
+- Opens an **Expo ngrok** tunnel for Metro (works through macOS firewall)
+- Writes `mobile/.env` automatically — no manual IP sync
 
-## Run
+## Troubleshooting
 
 ```bash
-npm run sync-api-ip
-npm run start          # LAN — all phones on same Wi‑Fi as Mac
+npm run doctor
 ```
 
-**Multiple phones (same room):** use `npm run start`, same Wi‑Fi, scan QR **inside Expo Go** on each phone (`exp://YOUR_MAC_IP:8081`).
+| Issue | Fix |
+|--------|-----|
+| First time / no ngrok token | `npm run setup` |
+| Expo tunnel failed | New token at [ngrok dashboard](https://dashboard.ngrok.com/get-started/your-authtoken) → `npm run setup` |
+| API unreachable on phone | Tap status on login screen; ensure Mac terminal is still running |
+| Same Wi‑Fi only, firewall off | `npm run start:lan` |
 
-**Any phone / any Wi‑Fi (different network, guest Wi‑Fi, mobile data):**
-```bash
-# 1. Backend running on the Mac
-cd .. && ./scripts/start-all.sh
+## Scripts
 
-# 2. Free ngrok token → mobile/.env (one-time)
-#    https://dashboard.ngrok.com/get-started/your-authtoken
-npm run sync:ngrok
+| Command | Purpose |
+|---------|---------|
+| `npm start` | Auto remote dev (default) |
+| `npm run setup` | One-time ngrok + deps |
+| `npm run start:lan` | LAN only (same Wi‑Fi, no firewall) |
+| `npm run doctor` | Diagnose connection issues |
+| `npm run stop` | Stop Metro |
 
-# 3. Remote mode (API tunnel + Expo tunnel)
-npm run start:remote
-```
-Each phone: open **Expo Go → Scan QR** (not the iPhone Camera app).  
-Login screen should show **🌐 Remote** and an `https://…ngrok…` or `loca.lt` API URL.
+## Screens
 
-Same Wi‑Fi again? `Ctrl+C` then `npm run sync-api-ip && npm run start`.
-
-```bash
-# Custom dev build (not Expo Go)
-npm run start:dev-client
-
-# Scan the QR code with Expo Go (iOS/Android)
-# Or press 'i' for iOS Simulator / 'a' for Android Emulator
-```
-
-## Build for production
-
-```bash
-# Install EAS CLI
-npm install -g eas-cli
-eas login
-
-# Configure
-eas build:configure
-
-# Build for iOS
-eas build --platform ios
-
-# Build for Android
-eas build --platform android
-```
-
-## Default login
-
-- Username: `admin`
-- Password: `admin123`
-
-## Push Notifications
-
-The app registers for Expo push notifications on startup (physical device only).
-The backend can send notifications via the Expo Push API to tokens stored after registration.
+Login · Home · Signals · Market · Leaderboard · Simulator
