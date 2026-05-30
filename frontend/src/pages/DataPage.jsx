@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useMemo, useCallback } from 'react'
 import Select from 'react-select'
 import toast from 'react-hot-toast'
 import client from '../api/client'
@@ -6,7 +6,8 @@ import JobStatusBadge from '../components/jobStatusBadge'
 import { CardSkeleton, TableSkeleton } from '../components/skeleton'
 
 const sourceOptions = [
-  { value: 'yahoo', label: 'Yahoo Finance (free)' },
+  { value: 'yahoo', label: 'Yahoo Finance — US (S&P 500, ETFs, indices)' },
+  { value: 'yahoo_egx', label: 'Yahoo Finance — Egypt (EGX)' },
   { value: 'alpaca', label: 'Alpaca Markets (requires API key)' },
   { value: 'mt5', label: 'MT5 Demo Gateway (requires API key)' },
 ]
@@ -21,8 +22,43 @@ const mt5TimeframeOptions = [
   { value: 'D1', label: 'D1' },
 ]
 
+function toTickerOption(t) {
+  return { value: t, label: t }
+}
+
+function buildGroupedOptions(catalog, flatList) {
+  if (catalog?.groups?.length) {
+    return catalog.groups
+      .filter((g) => g.tickers?.length)
+      .map((g) => ({
+        label: g.label,
+        options: g.tickers.map(toTickerOption),
+      }))
+  }
+  return (flatList || []).map(toTickerOption)
+}
+
+function defaultTickersForSource(sourceKey, allowedList, recommended) {
+  const allowed = new Set(allowedList || [])
+  if (!allowed.size) return []
+
+  if (sourceKey === 'mt5') {
+    return ['EURUSD', 'GBPUSD', 'XAUUSD'].filter((t) => allowed.has(t))
+  }
+  if (sourceKey === 'yahoo_egx') {
+    return allowedList.slice(0, Math.min(3, allowedList.length))
+  }
+
+  const preset = recommended?.length
+    ? recommended
+    : ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'SPY', 'QQQ']
+  const picked = preset.filter((t) => allowed.has(t))
+  return picked.length >= 3 ? picked : allowedList.slice(0, 8)
+}
+
 export default function DataPage() {
   const [allTickersBySource, setAllTickersBySource] = useState({})
+  const [tickerCatalogs, setTickerCatalogs] = useState({})
   const [selectedTickers, setSelectedTickers] = useState([])
   const [loadingInfo, setLoadingInfo] = useState(true)
   const [startDate, setStartDate] = useState('2020-01-01')
@@ -35,34 +71,60 @@ export default function DataPage() {
   const [submitting, setSubmitting] = useState(false)
   const [preview, setPreview] = useState(null)
 
-  useEffect(() => {
-    client.get('/api/info').then((r) => {
-      let tickersBySource = r.data.tickers_by_source || {}
-      
-      // Fallback: if old API (returns tickers array), convert to new format
-      if (!tickersBySource.yahoo && r.data.tickers) {
-        tickersBySource = {
-          yahoo: r.data.tickers,
-          alpaca: r.data.tickers,
-          mt5: r.data.tickers,
+  const activeCatalog = tickerCatalogs[source?.value]
+  const allowedList = allTickersBySource[source?.value] || []
+  const allowedSet = useMemo(() => new Set(allowedList), [allowedList])
+
+  const selectOptions = useMemo(() => {
+    return buildGroupedOptions(activeCatalog, allowedList)
+  }, [activeCatalog, allowedList])
+
+  const invalidSelected = useMemo(
+    () => selectedTickers.filter((t) => !allowedSet.has(t.value)),
+    [selectedTickers, allowedSet],
+  )
+
+  const applySelectionForSource = useCallback(
+    (sourceKey, prevSelected, { announceRemovals = false } = {}) => {
+      const list = allTickersBySource[sourceKey] || []
+      const allowed = new Set(list)
+      const kept = prevSelected.filter((o) => allowed.has(o.value))
+
+      if (announceRemovals) {
+        const removed = prevSelected.filter((o) => !allowed.has(o.value))
+        if (removed.length > 0) {
+          const label = sourceOptions.find((s) => s.value === sourceKey)?.label || sourceKey
+          toast.error(
+            `Not available for ${label}: ${removed.map((o) => o.value).join(', ')}`,
+            { duration: 6000 },
+          )
         }
       }
-      
-      console.log('Tickers by source:', tickersBySource)
+
+      if (kept.length > 0) return kept
+
+      const defaults = defaultTickersForSource(sourceKey, list, recommendedTickers)
+      return defaults.map(toTickerOption)
+    },
+    [allTickersBySource, recommendedTickers],
+  )
+
+  useEffect(() => {
+    client.get('/api/info').then((r) => {
+      const tickersBySource = r.data.tickers_by_source || {}
       setAllTickersBySource(tickersBySource)
-      
-      // Default: research preset tickers when available
+      setTickerCatalogs(r.data.ticker_catalogs || {})
+
       const yahooList = tickersBySource.yahoo || []
-      const presetList = ['AAPL', 'MSFT', 'GOOGL', 'AMZN', 'NVDA', 'META', 'SPY', 'QQQ', 'XLF', 'XLE', 'JPM', 'JNJ']
-      const picked = presetList.filter((t) => yahooList.includes(t))
-      const initialTickers = picked.length >= 3 ? picked : yahooList.slice(0, 8)
-      setSelectedTickers(initialTickers.map((t) => ({ value: t, label: t })))
+      const defaults = defaultTickersForSource('yahoo', yahooList, [])
+      setSelectedTickers(defaults.map(toTickerOption))
     }).catch((err) => {
       console.error('Failed to fetch /api/info:', err)
       toast.error('Failed to load tickers')
     }).finally(() => {
       setLoadingInfo(false)
     })
+
     client.get('/api/research/walk-forward-presets')
       .then((r) => {
         setRecommendedTickers(r.data.recommended_tickers || [])
@@ -75,28 +137,26 @@ export default function DataPage() {
       .catch(() => {})
   }, [])
 
-  const applyRecommendedTickers = () => {
-    if (!recommendedTickers.length || !source?.value) return
-    const list = allTickersBySource[source.value] || []
-    const opts = recommendedTickers
-      .filter((t) => list.includes(t))
-      .map((t) => ({ value: t, label: t }))
-    if (opts.length) {
-      setSelectedTickers(opts)
-      toast.success(`Selected ${opts.length} tickers (mega-cap + ETFs)`)
-    }
-  }
-
   useEffect(() => {
     if (!source?.value || !allTickersBySource[source.value]) return
-    const sourceTickersArray = allTickersBySource[source.value] || []
-    const presetList = recommendedTickers.length ? recommendedTickers : ['AAPL', 'MSFT', 'GOOGL', 'SPY', 'QQQ']
-    const picked = presetList.filter((t) => sourceTickersArray.includes(t))
-    const list = picked.length >= 3 ? picked : sourceTickersArray.slice(0, 8)
-    setSelectedTickers(list.map((t) => ({ value: t, label: t })))
-  }, [source, allTickersBySource, recommendedTickers])
+    setSelectedTickers((prev) =>
+      applySelectionForSource(source.value, prev, { announceRemovals: true }),
+    )
+  }, [source, allTickersBySource, applySelectionForSource])
 
-  // Poll job status
+  const applyRecommendedTickers = () => {
+    if (!recommendedTickers.length || !source?.value) return
+    const opts = recommendedTickers
+      .filter((t) => allowedSet.has(t))
+      .map(toTickerOption)
+    if (!opts.length) {
+      toast.error(`Research preset tickers are not available for ${source.label}`)
+      return
+    }
+    setSelectedTickers(opts)
+    toast.success(`Selected ${opts.length} tickers (research preset)`)
+  }
+
   useEffect(() => {
     if (!jobId || jobStatus === 'done' || jobStatus === 'failed') return
     const timer = setInterval(async () => {
@@ -105,7 +165,7 @@ export default function DataPage() {
       if (r.data.status === 'done') {
         clearInterval(timer)
         toast.success('Data download complete!')
-        client.get(`/api/data/preview/${jobId}`).then((r) => setPreview(r.data.rows))
+        client.get(`/api/data/preview/${jobId}`).then((res) => setPreview(res.data.rows))
       }
       if (r.data.status === 'failed') {
         clearInterval(timer)
@@ -116,19 +176,35 @@ export default function DataPage() {
   }, [jobId, jobStatus])
 
   const handleSubmit = async () => {
-    if (!selectedTickers.length) return toast.error('Select at least one ticker')
+    if (!selectedTickers.length) {
+      toast.error('Select at least one ticker')
+      return
+    }
+    if (invalidSelected.length > 0) {
+      toast.error(
+        `Not available for ${source.label}: ${invalidSelected.map((t) => t.value).join(', ')}`,
+      )
+      return
+    }
+
+    const tickers = selectedTickers.map((t) => t.value)
     setSubmitting(true)
     setPreview(null)
     try {
       const r = await client.post('/api/data/download', {
-        tickers: selectedTickers.map((t) => t.value),
+        tickers,
         start_date: startDate,
         end_date: endDate,
         source: source.value,
         timeframe: source.value === 'mt5' ? mt5Timeframe.value : null,
       })
       setJobId(r.data.job_id)
-      setJobStatus('pending')
+      setJobStatus(r.data.status || 'pending')
+    } catch (err) {
+      // Global axios interceptor already shows API errors (avoid duplicate toasts)
+      if (!err.response) {
+        toast.error('Cannot reach API — is the backend running on port 8002?')
+      }
     } finally {
       setSubmitting(false)
     }
@@ -143,6 +219,9 @@ export default function DataPage() {
       toast.error('Copy failed. Select and copy manually.')
     }
   }
+
+  const canUseResearchPreset = ['yahoo', 'alpaca'].includes(source?.value)
+    && recommendedTickers.some((t) => allowedSet.has(t))
 
   return (
     <div>
@@ -161,16 +240,41 @@ export default function DataPage() {
 
       <div className="bg-white border border-gray-200 rounded-xl p-6 space-y-5 max-w-2xl">
         <div>
+          <label className="block text-sm font-medium text-gray-700 mb-1">Data source</label>
+          <Select
+            options={sourceOptions}
+            value={source}
+            onChange={setSource}
+            className="text-sm"
+          />
+        </div>
+
+        <div>
           <label className="block text-sm font-medium text-gray-700 mb-1">Tickers</label>
           <Select
             isMulti
-            options={(allTickersBySource[source?.value] || []).map((t) => ({ value: t, label: t }))}
-            value={selectedTickers}
-            onChange={setSelectedTickers}
-            placeholder="Search tickers..."
+            options={selectOptions}
+            value={selectedTickers.filter((t) => allowedSet.has(t.value))}
+            onChange={(opts) => setSelectedTickers(opts || [])}
+            placeholder="Search tickers for this source..."
             className="text-sm"
+            noOptionsMessage={() => 'No symbols for this data source'}
           />
-          {recommendedTickers.length > 0 && (
+          {activeCatalog?.note && (
+            <p className="text-xs text-gray-500 mt-2">{activeCatalog.note}</p>
+          )}
+          {activeCatalog?.count > 0 && (
+            <p className="text-xs text-gray-400 mt-1">
+              {activeCatalog.count} symbols available for {source.label}
+            </p>
+          )}
+          {invalidSelected.length > 0 && (
+            <div className="mt-2 rounded-lg border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-800">
+              Not available for {source.label}:{' '}
+              <strong>{invalidSelected.map((t) => t.value).join(', ')}</strong>
+            </div>
+          )}
+          {canUseResearchPreset && (
             <button
               type="button"
               onClick={applyRecommendedTickers}
@@ -202,19 +306,6 @@ export default function DataPage() {
           </div>
         </div>
 
-        <div>
-          <label className="block text-sm font-medium text-gray-700 mb-1">Data source</label>
-          <Select
-            options={sourceOptions}
-            value={source}
-            onChange={setSource}
-            className="text-sm"
-          />
-          {source?.value === 'mt5' && (
-            <p className="text-xs text-gray-500 mt-1">Use MT5 symbol names such as BTCUSDm.</p>
-          )}
-        </div>
-
         {source?.value === 'mt5' && (
           <div>
             <label className="block text-sm font-medium text-gray-700 mb-1">MT5 timeframe</label>
@@ -224,13 +315,14 @@ export default function DataPage() {
               onChange={setMt5Timeframe}
               className="text-sm"
             />
+            <p className="text-xs text-gray-500 mt-1">Use MT5 symbol names from the list above.</p>
           </div>
         )}
 
         <div className="flex items-center gap-4">
           <button
             onClick={handleSubmit}
-            disabled={submitting}
+            disabled={submitting || invalidSelected.length > 0 || !selectedTickers.length}
             className="px-5 py-2 bg-gray-900 text-white text-sm rounded-lg hover:bg-gray-700 disabled:opacity-50 transition-colors"
           >
             {submitting ? 'Submitting...' : 'Download data'}

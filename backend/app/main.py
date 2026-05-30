@@ -58,6 +58,7 @@ def info():
     return {
         "agents": finrl_wrapper.get_agents(),
         "tickers_by_source": finrl_wrapper.get_tickers_by_source(),
+        "ticker_catalogs": finrl_wrapper.get_ticker_catalogs(),
         "indicators": finrl_wrapper.get_indicators(),
         "data_sources": finrl_wrapper.get_data_sources(),
         "finrl_status": finrl_wrapper.get_finrl_status(),

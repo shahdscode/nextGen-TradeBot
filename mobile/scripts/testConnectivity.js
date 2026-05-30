@@ -102,19 +102,40 @@ async function main() {
     }
   }
 
-  if (/loca\.lt|ngrok/.test(apiBase)) {
-    console.log('\n⚠  .env uses a tunnel URL. For same Wi‑Fi use: npm run sync-api-ip')
-    failed = true
+  const tunnelEnv = /loca\.lt|ngrok|trycloudflare/.test(apiBase)
+  if (tunnelEnv) {
+    console.log('\n  Remote/tunnel API in .env — use: npm run start:remote (keep terminal open)')
+  }
+
+  let fwOn = false
+  try {
+    const { execSync } = require('child_process')
+    const fw = execSync(
+      '/usr/libexec/ApplicationFirewall/socketfilterfw --getglobalstate',
+      { encoding: 'utf8' },
+    )
+    fwOn = /enabled/i.test(fw)
+  } catch {
+    /* ignore */
   }
 
   console.log('')
   if (failed) {
     console.log('Fix issues, then:')
-    console.log('  ./scripts/start-all.sh          # API on :8002')
-    console.log('  cd mobile && npm run sync-api-ip && npm run start')
+    console.log('  ./scripts/start-all.sh')
+    console.log('  cd mobile && npm run doctor')
     process.exit(1)
   }
-  console.log('All checks passed. Open Expo Go → scan QR → exp://' + (ip || 'YOUR_IP') + ':8081')
+  if (fwOn && !tunnelEnv) {
+    console.log('⚠ macOS Firewall is ON — LAN QR often fails from phones.')
+    console.log('  → npm run start:remote   (works on any network)')
+    console.log('  → or allow Node in System Settings → Firewall\n')
+  }
+  if (tunnelEnv) {
+    console.log('Mac checks passed. On phone: Expo Go → scan QR from start:remote terminal.')
+  } else {
+    console.log('All checks passed. Expo Go → exp://' + (ip || 'YOUR_IP') + ':8081')
+  }
   console.log('Login: admin / admin123\n')
 }
 

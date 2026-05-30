@@ -29,7 +29,7 @@ CAUSAL_FEATURE_REGISTRY: Dict[str, str] = {
     "price_mom_5":     "close / close.shift(5) − 1",
     "price_mom_20":    "close / close.shift(20) − 1",
     "frac_diff_close": "fractional diff on past closes (d=0.4)",
-    "turbulence":      "rolling return volatility",
+    "turbulence":      "Mahalanobis distance (cross-sectional) or rolling-volatility proxy if single-ticker",
     "high_low_range":  "(high−low)/close same bar",
     "gap":             "open vs prior close",
     "obv_zscore":      "cumulative volume direction, z-scored",

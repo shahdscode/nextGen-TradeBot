@@ -41,6 +41,7 @@ def collect_oof_task(
     from pathlib import Path
     from app.services.feature_service import (
         add_cross_sectional_rank,
+        add_mahalanobis_turbulence,
         download_vix,
         generate_walk_forward_folds,
         save_fold_definitions,
@@ -85,7 +86,9 @@ def collect_oof_task(
         else:
             df = pd.read_csv(data_path)
 
-        # ── Cross-sectional rank (must happen before per-ticker build_features) ──
+        # ── Cross-sectional features (must happen before per-ticker build_features) ──
+        # Mahalanobis turbulence first (overwrites the per-ticker proxy from download)
+        df = add_mahalanobis_turbulence(df)
         df = add_cross_sectional_rank(df)
 
         # ── VIX (US tickers only) ──────────────────────────────────────────

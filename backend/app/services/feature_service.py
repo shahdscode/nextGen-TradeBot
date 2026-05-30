@@ -75,6 +75,122 @@ def download_vix(start_date: str, end_date: str) -> pd.DataFrame:
         return pd.DataFrame(columns=["date", "vix_level", "vix_zscore"])
 
 
+# ── Mahalanobis turbulence ─────────────────────────────────────────────────────
+
+def add_mahalanobis_turbulence(
+    df: pd.DataFrame,
+    lookback: int = 252,
+    training_start: Optional[str] = None,
+) -> pd.DataFrame:
+    """
+    Compute the Kritzman (2010) Mahalanobis turbulence index for every date.
+
+    For each date t:
+        turbulence_t = (r_t − μ)ᵀ · Σ⁻¹ · (r_t − μ)
+
+    where r_t  = vector of all-ticker daily returns on day t,
+          μ    = mean return vector over the trailing *lookback* window,
+          Σ    = covariance matrix of returns over the same window.
+
+    This is a cross-sectional measure: it captures whether all tickers are
+    moving abnormally together (systemic stress), NOT just whether one ticker
+    is volatile.  Correlation with per-ticker rolling-std proxy ≈ 0.32 —
+    they are largely different signals.
+
+    MUST be called on the full multi-ticker DataFrame BEFORE per-ticker
+    build_features() calls or walk-forward splitting.
+
+    WARMUP REQUIREMENT: the first `lookback` trading days produce turbulence=0
+    because there is not enough history to estimate Σ.  For correct COVID-2020
+    detection with lookback=252 (1 year), download data from 2019-01-01 even
+    though the training window starts 2020-01-01.  Use training_start= to be
+    warned if insufficient warmup is available.
+
+    Parameters
+    ----------
+    df             : multi-ticker OHLCV DataFrame with 'date', 'tic', 'close'
+    lookback       : rolling window for μ and Σ (default 252 = 1 year)
+    training_start : "YYYY-MM-DD" — if supplied, warns when the gap between
+                     the earliest data row and training_start < lookback days
+
+    Returns
+    -------
+    df with an overwritten 'turbulence' column (Mahalanobis distance, each row
+    shares the cross-sectional turbulence for its date).
+    """
+    df = df.copy()
+    df["date"] = pd.to_datetime(df["date"])
+
+    # Warmup check
+    if training_start:
+        ts = pd.to_datetime(training_start)
+        earliest = df["date"].min()
+        warmup_days = (ts - earliest).days
+        if warmup_days < lookback:
+            logger.warning(
+                "add_mahalanobis_turbulence: only %d calendar days of warmup before "
+                "training_start=%s (need ~%d for lookback=%d). "
+                "Download from at least %s to get correct COVID-2020 detection.",
+                warmup_days, training_start, int(lookback * 1.4),
+                lookback,
+                (ts - pd.Timedelta(days=int(lookback * 1.4))).date(),
+            )
+
+    # Build date × ticker return pivot
+    pivot = (
+        df.pivot_table(index="date", columns="tic", values="close", aggfunc="last")
+        .sort_index()
+        .pct_change()
+    )
+
+    # Compute rolling Mahalanobis turbulence
+    turb_series: dict = {}
+    dates = pivot.index.tolist()
+
+    for i, date in enumerate(dates):
+        if i < lookback:
+            turb_series[date] = 0.0
+            continue
+
+        window = pivot.iloc[i - lookback:i].dropna(axis=1)   # drop tickers with NaN
+        if window.shape[1] < 2:
+            turb_series[date] = 0.0
+            continue
+
+        r_t_series = pivot.loc[date, window.columns]
+        if r_t_series.isna().any():
+            turb_series[date] = 0.0
+            continue
+        r_t = r_t_series.values
+
+        mu  = window.mean().values
+        cov = window.cov().values
+        try:
+            cov_inv = np.linalg.pinv(cov)
+            diff = (r_t - mu)
+            turb = float(diff @ cov_inv @ diff)
+            turb_series[date] = max(0.0, turb)   # can't be negative
+        except Exception:
+            turb_series[date] = 0.0
+
+    turb_df = pd.DataFrame.from_dict(turb_series, orient="index", columns=["turbulence"])
+    turb_df.index.name = "date"
+    turb_df = turb_df.reset_index()
+    turb_df["date"] = pd.to_datetime(turb_df["date"])
+
+    # Merge back — every ticker on a given date gets the same turbulence value
+    df = df.merge(turb_df, on="date", how="left", suffixes=("_old", ""))
+    if "turbulence_old" in df.columns:
+        df = df.drop(columns=["turbulence_old"])
+    df["turbulence"] = df["turbulence"].fillna(0.0)
+
+    logger.info(
+        "Mahalanobis turbulence computed: mean=%.2f, max=%.2f (lookback=%d days)",
+        df["turbulence"].mean(), df["turbulence"].max(), lookback,
+    )
+    return df
+
+
 # ── Cross-sectional feature ────────────────────────────────────────────────────
 
 def add_cross_sectional_rank(df: pd.DataFrame) -> pd.DataFrame:
@@ -155,11 +271,62 @@ def build_features(
     low   = g["low"].astype(float)
     volume = g["volume"].astype(float).replace(0, np.nan).fillna(1)
 
-    # ── Existing indicators (pass-through if already computed) ──────────────
-    for col in ["macd", "rsi_30", "boll_ub", "boll_lb", "close_30_sma",
-                "close_60_sma", "cci_30", "dx_30", "turbulence"]:
-        if col not in g.columns:
-            g[col] = 0.0
+    # ── Base indicators: pass-through if pre-computed, otherwise derive from OHLCV ──
+    # Pre-computed by _add_basic_indicators() during download → fast path.
+    # If the DataFrame comes from raw OHLCV (e.g. unit tests), compute here so
+    # nothing silently becomes 0 and trains on zeros.
+
+    if "macd" not in g.columns:
+        _ema12 = close.ewm(span=12, adjust=False).mean()
+        _ema26 = close.ewm(span=26, adjust=False).mean()
+        g["macd"] = _ema12 - _ema26
+
+    if "rsi_30" not in g.columns:
+        _delta = close.diff()
+        _gain  = _delta.clip(lower=0).rolling(30).mean()
+        _loss  = (-_delta.clip(upper=0)).rolling(30).mean().replace(0, 1e-9)
+        g["rsi_30"] = 100 - (100 / (1 + _gain / _loss))
+
+    if "boll_ub" not in g.columns or "boll_lb" not in g.columns:
+        _rm  = close.rolling(20).mean()
+        _rs  = close.rolling(20).std()
+        g["boll_ub"] = _rm + 2 * _rs
+        g["boll_lb"] = _rm - 2 * _rs
+
+    if "close_30_sma" not in g.columns:
+        g["close_30_sma"] = close.rolling(30).mean()
+
+    if "close_60_sma" not in g.columns:
+        g["close_60_sma"] = close.rolling(60).mean()
+
+    if "cci_30" not in g.columns:
+        _tp     = (high + low + close) / 3
+        _tp_sma = _tp.rolling(30).mean()
+        _mad    = (_tp - _tp_sma).abs().rolling(30).mean().replace(0, 1e-9)
+        g["cci_30"] = (_tp - _tp_sma) / (0.015 * _mad)
+
+    if "dx_30" not in g.columns:
+        _up  = high.diff()
+        _dn  = -low.diff()
+        _pdm = _up.where((_up > _dn) & (_up > 0), 0.0)
+        _mdm = _dn.where((_dn > _up) & (_dn > 0), 0.0)
+        _tr  = pd.concat([high - low,
+                          (high - close.shift()).abs(),
+                          (low  - close.shift()).abs()], axis=1).max(axis=1)
+        _atr30 = _tr.rolling(30).mean().replace(0, 1e-9)
+        _pdi   = 100 * (_pdm.rolling(30).sum() / _atr30)
+        _mdi   = 100 * (_mdm.rolling(30).sum() / _atr30)
+        g["dx_30"] = ((_pdi - _mdi).abs() / (_pdi + _mdi).replace(0, 1e-9)) * 100
+
+    if "turbulence" not in g.columns:
+        # Per-ticker volatility proxy — will be overwritten by add_mahalanobis_turbulence()
+        # when the full multi-ticker DataFrame is processed before fold splitting.
+        g["turbulence"] = close.pct_change().rolling(20).std().fillna(0) * 1000
+        logger.debug(
+            "turbulence for %s: using per-ticker volatility proxy. "
+            "Call add_mahalanobis_turbulence(full_df) before build_features() "
+            "for the academically correct cross-sectional Mahalanobis measure.", ticker
+        )
 
     # ── Additional features ─────────────────────────────────────────────────
 

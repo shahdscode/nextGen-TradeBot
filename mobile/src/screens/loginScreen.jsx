@@ -16,12 +16,17 @@ export default function LoginScreen() {
   const [apiUrl, setApiUrl] = useState(resolveApiBaseUrl())
   const [apiStatus, setApiStatus] = useState('checking') // checking | ok | fail
 
-  useEffect(() => {
+  const checkApi = () => {
     const url = resolveApiBaseUrl()
     setApiUrl(url)
+    setApiStatus('checking')
     silentRequest({ method: 'get', url: '/health' })
       .then(() => setApiStatus('ok'))
       .catch(() => setApiStatus('fail'))
+  }
+
+  useEffect(() => {
+    checkApi()
   }, [])
 
   const handleLogin = async () => {
@@ -97,15 +102,17 @@ export default function LoginScreen() {
           <Text style={styles.apiHint} numberOfLines={2}>
             {isRemoteApiMode() ? '🌐 Remote' : '📶 LAN'} · API: {apiUrl}
           </Text>
-          <Text style={[
-            styles.apiStatus,
-            apiStatus === 'ok' && styles.apiStatusOk,
-            apiStatus === 'fail' && styles.apiStatusFail,
-          ]}>
-            {apiStatus === 'checking' && 'Checking API…'}
-            {apiStatus === 'ok' && '● API reachable'}
-            {apiStatus === 'fail' && '● API unreachable — run ./scripts/start-all.sh'}
-          </Text>
+          <TouchableOpacity onPress={checkApi} disabled={apiStatus === 'checking'}>
+            <Text style={[
+              styles.apiStatus,
+              apiStatus === 'ok' && styles.apiStatusOk,
+              apiStatus === 'fail' && styles.apiStatusFail,
+            ]}>
+              {apiStatus === 'checking' && 'Checking API…'}
+              {apiStatus === 'ok' && '● API reachable'}
+              {apiStatus === 'fail' && '● API unreachable — tap to retry (keep Mac terminal open)'}
+            </Text>
+          </TouchableOpacity>
         </View>
       </View>
     </KeyboardAvoidingView>

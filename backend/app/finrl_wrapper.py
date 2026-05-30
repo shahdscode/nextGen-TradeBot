@@ -14,13 +14,13 @@ import subprocess
 import sys
 from typing import List, Dict, Any
 
-# Static defaults (same as finrl.config_tickers / finrl.config)
-DOW_30_TICKER = [
-    "AXP", "AMGN", "AAPL", "BA", "CAT", "CSCO", "CVX", "GS",
-    "HD", "HON", "IBM", "INTC", "JNJ", "JPM", "KO", "MCD",
-    "MMM", "MRK", "MSFT", "NKE", "PG", "TRV", "UNH", "CRM",
-    "VZ", "V", "WBA", "WMT", "DIS", "DOW",
-]
+from app.ticker_catalog import (
+    DOW_30_TICKER,
+    EGX_30_BENCHMARK,
+    EGX_30_TICKERS,
+    get_all_catalogs,
+    get_tickers_by_source as _catalog_tickers_by_source,
+)
 INDICATORS = [
     "macd", "boll_ub", "boll_lb", "rsi_30", "cci_30",
     "dx_30", "close_30_sma", "close_60_sma",
@@ -145,8 +145,13 @@ SUPPORTED_AGENTS = {
 
 SUPPORTED_DATA_SOURCES = {
     "yahoo": {
-        "name": "Yahoo Finance",
+        "name": "Yahoo Finance (US)",
         "description": "Free, no API key required.",
+        "requires_key": False,
+    },
+    "yahoo_egx": {
+        "name": "Yahoo Finance (EGX)",
+        "description": "Egyptian stocks via Yahoo (.CA suffix).",
         "requires_key": False,
     },
     "alpaca": {
@@ -171,47 +176,12 @@ def get_tickers() -> List[str]:
     return DOW_30_TICKER
 
 
-EGX_30_TICKERS = [
-    "COMI.CA",
-    "HRHO.CA",
-    "ETEL.CA",
-    "TMGH.CA",
-    "EFIH.CA",
-    "EKHO.CA",
-    "PHDC.CA",
-    "OCDI.CA",
-    "ABUK.CA",
-    "ORAS.CA",
-]
-
-EGX_30_BENCHMARK = "^CASE30"
-
-
 def get_tickers_by_source() -> Dict[str, List[str]]:
-    mt5_tickers = [
-        "EURUSD", "GBPUSD", "USDJPY", "AUDUSD", "USDCAD", "NZDUSD",
-        "EURJPY", "GBPJPY", "EURGBP", "EURCAD", "AUDNZD", "AUDCAD",
-        "AUDJPY", "CADJPY", "CHFUSD", "EURAUD", "EURCHF", "GBPAUD",
-        "GBPCAD", "GBPCHF", "NZDJPY", "USDCHF",
-        "XAUUSD", "XAGUSD", "XPTUSD", "XPDUSD",
-        "BRENT", "WTIUSD",
-        "SP500", "USTEC", "DAX", "FTSE100", "CAC40", "NIKKEI", "HSI", "ASX200",
-        "BTCUSD", "ETHUSD", "LTCUSD", "XRPUSD", "ADAUSD", "DOGEUSD",
-        "BTCUSDm", "ETHUSDm",
-        "AAPL", "MSFT", "GOOGL", "AMZN", "TSLA", "NVDA", "META", "NFLX",
-    ]
-    yahoo_tickers = list(
-        dict.fromkeys(
-            DOW_30_TICKER
-            + ["SPY", "QQQ", "XLF", "XLE", "IWM", "VTI", "GLD", "TLT"]
-        )
-    )
-    return {
-        "yahoo": yahoo_tickers,
-        "yahoo_egx": EGX_30_TICKERS,
-        "alpaca": DOW_30_TICKER,
-        "mt5": mt5_tickers,
-    }
+    return _catalog_tickers_by_source()
+
+
+def get_ticker_catalogs() -> Dict[str, Any]:
+    return get_all_catalogs()
 
 
 def get_indicators(include_rl_extras: bool = False) -> List[str]:
