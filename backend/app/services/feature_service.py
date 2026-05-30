@@ -169,7 +169,10 @@ def add_mahalanobis_turbulence(
             cov_inv = np.linalg.pinv(cov)
             diff = (r_t - mu)
             turb = float(diff @ cov_inv @ diff)
-            turb_series[date] = max(0.0, turb)   # can't be negative
+            # Clip to finite positive value — extreme values (>1e4) arise from
+            # near-singular covariance matrices on holiday/zero-return days and
+            # would cause downstream ML models to reject the data as "too large".
+            turb_series[date] = float(np.clip(max(0.0, turb), 0.0, 1e4))
         except Exception:
             turb_series[date] = 0.0
 
@@ -263,6 +266,20 @@ def build_features(
             )
 
     g = df[df["tic"] == ticker].copy().sort_values("date").reset_index(drop=True)
+    if g.empty:
+        return g
+
+    # Drop rows where close == 0 (exchange holidays filled with 0 by yfinance).
+    # These rows cause division-by-zero in gap/ema_cross and distort Mahalanobis
+    # turbulence.  Forward-fill within the caller's DataFrame is the canonical fix;
+    # this filter is a secondary safety net for any that slip through.
+    zero_rows = (g["close"].astype(float) == 0)
+    if zero_rows.any():
+        logger.debug(
+            "%s: dropping %d zero-close rows (exchange holidays) before feature computation",
+            ticker, zero_rows.sum(),
+        )
+        g = g[~zero_rows].reset_index(drop=True)
     if g.empty:
         return g
 
@@ -420,6 +437,10 @@ def build_features(
     # Drop last 5 rows — 5-day forward price does not yet exist for them
     g = g.iloc[:-5]
 
+    # Replace inf/-inf with 0 (can arise from division by near-zero prices)
+    # and then fill remaining NaN.  This must happen before returning so no
+    # model ever receives inf or NaN in its feature matrix.
+    g = g.replace([np.inf, -np.inf], np.nan)
     return g.fillna(0)
 
 
