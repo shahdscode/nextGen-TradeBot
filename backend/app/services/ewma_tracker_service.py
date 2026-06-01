@@ -73,6 +73,7 @@ def update_scores_for_date(
     model_predictions: Dict[str, float],
     actual_returns: Dict[str, float],
     db_session,
+    correct_overrides: Dict[str, float] = None,
 ) -> Dict[str, float]:
     """
     Update EWMA scores based on outcomes for one trading date.
@@ -116,23 +117,26 @@ def update_scores_for_date(
         )
         latest[key] = row.ewma_score if row is not None else INITIAL_SCORE
 
+    def _correct_for(key: str) -> float:
+        # Cross-sectional hit rate if provided (differentiates models that all
+        # lean the same way on the market average); else market-average call.
+        if correct_overrides is not None and key in correct_overrides:
+            return float(correct_overrides[key])
+        signal = float(model_predictions.get(key, 0.5))
+        return 1.0 if (signal > 0.5) == actual_up else 0.0
+
     new_scores: Dict[str, float] = {}
     for key in MODEL_KEYS:
-        signal       = float(model_predictions.get(key, 0.5))
-        predicted_up = signal > 0.5
-        correct      = 1.0 if predicted_up == actual_up else 0.0
-
-        new_score    = EWMA_DECAY * latest[key] + (1 - EWMA_DECAY) * correct
-        new_scores[key] = float(new_score)
+        new_scores[key] = float(
+            EWMA_DECAY * latest[key] + (1 - EWMA_DECAY) * _correct_for(key)
+        )
 
     # Compute normalised weights with floor
     weights = _scores_to_weights(new_scores)
 
     # Persist
     for key in MODEL_KEYS:
-        signal       = float(model_predictions.get(key, 0.5))
-        predicted_up = signal > 0.5
-        correct      = 1.0 if predicted_up == actual_up else 0.0
+        correct = _correct_for(key)
 
         row = ModelPerformanceScore(
             id            = str(uuid.uuid4()),
