@@ -6,11 +6,11 @@ Step 1 upgrades (CLAUDE.md):
   1a. VIX feature (US only; EGX gets 0.0)
   1b. 52-week price range position
   1c. Cross-sectional 20-day momentum rank
-  1d. Target changed from 1-day to 5-day forward return
+  1d. Target: triple-barrier label (López de Prado) over TARGET_HORIZON days
 
 Walk-forward fold generator ensures no data leakage.
-Last 5 rows of each training fold are dropped to prevent the 5-day
-forward-return target from peeking into the test window.
+The last TARGET_HORIZON rows of each training fold are dropped to prevent the
+forward-looking triple-barrier target from peeking into the test window.
 """
 import logging
 import numpy as np
@@ -18,6 +18,22 @@ import pandas as pd
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
+
+# ── Target labeling configuration ─────────────────────────────────────────────
+# The original 5-day sign target was near-random (OOF AUC ≈ 0.50) because short-
+# horizon large-cap direction is dominated by noise around zero. We switch to a
+# triple-barrier label (López de Prado, Advances in Financial ML, 2018):
+#   For each day t, set an upper barrier at +k·σ and lower at −k·σ (σ = 20d vol).
+#   Look forward up to TARGET_HORIZON days:
+#     label = 1 if the upper (profit) barrier is touched first,
+#     label = 0 if the lower barrier is touched first,
+#     if neither is touched by the vertical (time) barrier → label by sign of
+#     the return at expiry.
+# This produces a cleaner, more learnable label and de-noises flat moves.
+# Tuned by horizon/barrier sweep: H=20,k=2.0 gave the best OOF AUC (~0.53)
+# vs ~0.50 for the old 5-day sign target and 0.515 for H=10,k=1.0.
+TARGET_HORIZON = 20        # vertical (time) barrier, trading days
+TARGET_BARRIER_K = 2.0     # barrier width in units of 20-day volatility
 
 FEATURE_COLUMNS = [
     "macd", "rsi_30", "rsi_14", "boll_ub", "boll_lb", "bb_width",
@@ -250,7 +266,7 @@ def build_features(
     Returns
     -------
     DataFrame with FEATURE_COLUMNS + 'target' column.
-    Last 5 rows are always dropped (5-day forward return unavailable).
+    Last TARGET_HORIZON rows are always dropped (forward window unobservable).
     All NaNs are filled with 0.
     """
     # Auto-detect ticker for single-ticker DataFrames
@@ -427,21 +443,72 @@ def build_features(
     if "rank_20d_mom" not in g.columns:
         g["rank_20d_mom"] = 0.5
 
-    # ── 1d. Target: 5-day forward return direction ──────────────────────────
-    # Replaces the old 1-day target.
-    # Use a private temp name to avoid triggering the '_fwd' leakage check in
-    # verify_no_leakage (the column is dropped before the function returns).
-    _fwd_return = np.log(close.shift(-5) / (close + 1e-9))
-    g["target"] = (_fwd_return > 0).astype(int)
+    # ── 1d. Target: triple-barrier label over TARGET_HORIZON days ────────────
+    # Volatility-scaled barriers de-noise the flat moves that made the old
+    # 5-day sign target near-random. See TARGET_HORIZON / TARGET_BARRIER_K.
+    g["target"] = _triple_barrier_label(
+        close, horizon=TARGET_HORIZON, k=TARGET_BARRIER_K
+    )
 
-    # Drop last 5 rows — 5-day forward price does not yet exist for them
-    g = g.iloc[:-5]
+    # Drop last TARGET_HORIZON rows — forward window not yet observable
+    g = g.iloc[:-TARGET_HORIZON]
 
     # Replace inf/-inf with 0 (can arise from division by near-zero prices)
     # and then fill remaining NaN.  This must happen before returning so no
     # model ever receives inf or NaN in its feature matrix.
     g = g.replace([np.inf, -np.inf], np.nan)
     return g.fillna(0)
+
+
+def _triple_barrier_label(
+    close: pd.Series,
+    horizon: int = TARGET_HORIZON,
+    k: float = TARGET_BARRIER_K,
+    vol_window: int = 20,
+) -> pd.Series:
+    """
+    Triple-barrier labeling (López de Prado 2018).
+
+    For each row t:
+      σ_t      = rolling std of daily returns (vol_window)
+      upper    = close_t · (1 + k·σ_t)   (profit-taking barrier)
+      lower    = close_t · (1 − k·σ_t)   (stop-loss barrier)
+      Scan close_{t+1 … t+horizon}:
+        → first touch of upper  ⇒ label 1
+        → first touch of lower  ⇒ label 0
+        → neither (time barrier) ⇒ label = 1 if close_{t+horizon} > close_t else 0
+
+    Returns an int Series aligned to `close` (last `horizon` rows are 0-padded;
+    build_features drops them).
+    """
+    n = len(close)
+    c = close.values.astype(float)
+    rets = pd.Series(c).pct_change()
+    sigma = rets.rolling(vol_window).std().fillna(rets.std()).values
+    labels = np.zeros(n, dtype=int)
+
+    for t in range(n - horizon):
+        ct = c[t]
+        if ct <= 0:
+            continue
+        s = sigma[t] if sigma[t] > 1e-6 else 0.01
+        upper = ct * (1.0 + k * s)
+        lower = ct * (1.0 - k * s)
+        window = c[t + 1 : t + 1 + horizon]
+        hit = 0
+        for px in window:
+            if px >= upper:
+                hit = 1
+                break
+            if px <= lower:
+                hit = 0
+                break
+        else:
+            # No barrier hit → sign at vertical (time) barrier
+            hit = 1 if window[-1] > ct else 0
+        labels[t] = hit
+
+    return pd.Series(labels, index=close.index)
 
 
 def _frac_diff(series: pd.Series, d: float = 0.4, thres: float = 1e-5) -> pd.Series:
@@ -473,9 +540,9 @@ def generate_walk_forward_folds(
     Each fold trains on ``train_months`` months and tests on the next
     ``test_months`` month(s).  Test data is always strictly after training data.
 
-    LEAKAGE GUARD: the last 5 trading-days of EACH training fold are removed.
-    This prevents the 5-day forward-return target from incorporating any
-    prices that fall inside the test window.
+    LEAKAGE GUARD: the last TARGET_HORIZON trading-days of EACH training fold
+    are removed. This prevents the forward-looking triple-barrier target from
+    incorporating any prices that fall inside the test window.
     """
     df = df.copy()
     df["date"] = pd.to_datetime(df["date"])
@@ -494,20 +561,20 @@ def generate_walk_forward_folds(
         train_df = df[df["date"] < train_end].copy()
         test_df  = df[(df["date"] >= train_end) & (df["date"] < test_end)].copy()
 
-        # CRITICAL: drop last 5 unique trading-dates from training fold.
-        # Rows in those dates have targets that look 5 days forward into
-        # the test window → label leakage.
+        # CRITICAL: drop last TARGET_HORIZON unique trading-dates from training
+        # fold. Their triple-barrier targets look forward into the test window
+        # → label leakage. Horizon-aware embargo (was hardcoded 5).
         if len(train_df) > 0:
-            last_5_dates = train_df["date"].sort_values().unique()[-5:]
-            train_df = train_df[~train_df["date"].isin(last_5_dates)]
+            embargo_dates = train_df["date"].sort_values().unique()[-TARGET_HORIZON:]
+            train_df = train_df[~train_df["date"].isin(embargo_dates)]
 
         if len(train_df) >= 60 and len(test_df) >= 5:
             folds.append((train_df, test_df))
 
         cursor += pd.DateOffset(months=test_months)
 
-    logger.info("Generated %d walk-forward folds (train=%dm, test=%dm, leakage guard=5d)",
-                len(folds), train_months, test_months)
+    logger.info("Generated %d walk-forward folds (train=%dm, test=%dm, leakage guard=%dd)",
+                len(folds), train_months, test_months, TARGET_HORIZON)
     return folds
 
 

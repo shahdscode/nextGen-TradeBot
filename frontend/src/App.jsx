@@ -8,14 +8,17 @@ import ProtectedRoute from './components/protectedRoute'
 import LoginPage from './pages/loginPage'
 
 // Admin pages
-import DashboardPage    from './pages/dashboardPage'
-import DataPage         from './pages/dataPage'
-import TrainingPage     from './pages/trainingPage'
-import MLTrainingPage   from './pages/mlTrainingPage'
-import BacktestPage     from './pages/backtestPage'
-import ComparePage      from './pages/comparePage'
-import PublishPage      from './pages/publishPage'
-import PaperTradingPage from './pages/paperTradingPage'
+import DashboardPage       from './pages/dashboardPage'
+import DataPage            from './pages/dataPage'
+import TrainingPage        from './pages/trainingPage'
+import MLTrainingPage      from './pages/mlTrainingPage'
+import BacktestPage        from './pages/backtestPage'
+import ComparePage         from './pages/comparePage'
+import PublishPage         from './pages/publishPage'
+import PaperTradingPage    from './pages/paperTradingPage'
+import MetaLearnerPage     from './pages/MetaLearnerPage'
+import ModelWeightsPage    from './pages/ModelWeightsPage'
+import ModelPerformancePage from './pages/ModelPerformancePage'
 
 // User pages
 import SignalsPage      from './pages/signalsPage'
@@ -48,6 +51,9 @@ export default function App() {
             <Route path="compare" element={<ProtectedRoute adminOnly><ComparePage /></ProtectedRoute>} />
             <Route path="publish" element={<ProtectedRoute adminOnly><PublishPage /></ProtectedRoute>} />
             <Route path="paper-trading" element={<ProtectedRoute adminOnly><PaperTradingPage /></ProtectedRoute>} />
+            <Route path="meta-learner" element={<ProtectedRoute adminOnly><MetaLearnerPage /></ProtectedRoute>} />
+            <Route path="model-weights" element={<ProtectedRoute adminOnly><ModelWeightsPage /></ProtectedRoute>} />
+            <Route path="performance" element={<ProtectedRoute adminOnly><ModelPerformancePage /></ProtectedRoute>} />
 
             {/* User routes — accessible to all authenticated users */}
             <Route path="signals" element={<SignalsPage />} />

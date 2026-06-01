@@ -86,6 +86,10 @@ def train_agent(
     price_overlay: Dict[str, Any] = {}
     if FINRL_AVAILABLE:
         try:
+            # Mock optional commercial deps before any finrl import
+            from app.finrl_wrapper import _mock_finrl_optional_deps
+            _mock_finrl_optional_deps()
+
             from finrl.meta.preprocessor.preprocessors import data_split
             from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
             from finrl.agents.stablebaselines3.models import DRLAgent

@@ -59,6 +59,7 @@ class RunResponse(BaseModel):
     error: Optional[str] = None
     published: Optional[bool] = None
     market: Optional[str] = None
+    data_job_id: Optional[str] = None   # used by frontend to detect checkpoints
 
 
 # ── Backtest ──────────────────────────────────────────────────────────────────

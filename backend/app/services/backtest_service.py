@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from app.config import settings
 from app import finrl_wrapper
@@ -51,6 +54,43 @@ _STEP_LOG_REPLAY_RULES: Dict[str, Any] = {
     "mid_stream_start": "consumers MUST begin at step 0 or the first _full row after header",
     "missing_steps": "gaps allowed; state at step t requires replay from last anchor ≤ t",
 }
+
+
+# ── FinRL prediction (Gym/SB3 API-compatible rollout) ─────────────────────────
+
+def _finrl_predict(algorithm: str, model_path: str, env):
+    """
+    Deterministic rollout of a trained SB3 model through a FinRL StockTradingEnv.
+
+    Replaces FinRL's DRLAgent.DRL_prediction_load_from_file(), which is broken
+    against the installed gymnasium/SB3 version (it passes the (obs, info) reset
+    tuple straight into model.predict()). We handle both the Gym 5-tuple step
+    and the (obs, info) reset here.
+
+    Returns (df_account_value, df_actions) using the env's own memory savers,
+    so downstream _parse_trades / _write_finrl_step_log stay unchanged.
+    """
+    from stable_baselines3 import PPO, A2C, DDPG, TD3, SAC
+    algo_map = {"ppo": PPO, "a2c": A2C, "ddpg": DDPG, "td3": TD3, "sac": SAC}
+    cls = algo_map.get(algorithm.lower())
+    if cls is None:
+        raise ValueError(f"Unsupported RL algorithm for backtest: {algorithm}")
+
+    model = cls.load(model_path)
+
+    reset_out = env.reset()
+    obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
+    done = False
+    while not done:
+        action, _ = model.predict(obs, deterministic=True)
+        step_out = env.step(action)
+        if len(step_out) == 5:            # Gym API: obs, reward, terminated, truncated, info
+            obs, _, terminated, truncated, _ = step_out
+            done = bool(terminated or truncated)
+        else:                              # legacy 4-tuple
+            obs, _, done, _ = step_out
+
+    return env.save_asset_memory(), env.save_action_memory()
 
 
 # ── Effective price helpers ───────────────────────────────────────────────────
@@ -338,10 +378,15 @@ def run_backtest(
 
     trades: List[Dict] = []
     use_synthetic = False
+    use_synthetic_reason: Optional[str] = None
     data_source   = "unknown"
     data_quality: Dict = {}
 
     step_log_path = str(results_dir / "step_log.jsonl")
+
+    # Step-4 models were trained with the 25-feature matrix (features_us.csv),
+    # NOT the 37-feature alpha pipeline. Detect them so we build a matching env.
+    is_step4 = (run.data_job_id or "").startswith("step4")
 
     # ── Try real FinRL model ──────────────────────────────────────────────────
     if FINRL_AVAILABLE and model_path and Path(str(model_path) + ".zip").exists():
@@ -350,25 +395,55 @@ def run_backtest(
             from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
             from finrl.agents.stablebaselines3.models import DRLAgent
 
-            from app.services.rl_features import build_alpha_state_pipeline
+            if is_step4:
+                # ── Step-4 path: 25 raw features from the OOF feature matrix ──
+                from app.services.feature_service import FEATURE_COLUMNS
+                tech_indicators = list(FEATURE_COLUMNS)  # 25 features, single source of truth
 
-            df      = pd.read_csv(data_path)
-            test_df = data_split(df, test_start, test_end)
-            tech_indicators = finrl_wrapper.get_indicators(include_rl_extras=True)
-            test_df, overlay_info = overlay_yahoo_closes(
-                test_df, test_start, test_end, tech_indicators
-            )
-            run_meta = run.metrics_json or {}
-            alpha_in = run_meta.get("alpha_inputs") or {}
-            test_df = build_alpha_state_pipeline(
-                test_df,
-                xgb_run_id=alpha_in.get("xgb_run_id"),
-                lstm_run_id=alpha_in.get("lstm_run_id"),
-                data_job_id=run.data_job_id,
-            )
-            for ind in tech_indicators:
-                if ind not in test_df.columns:
-                    test_df[ind] = 0.0
+                features_file = Path(settings.oof_dir) / "features_us.csv"
+                if not features_file.exists():
+                    raise FileNotFoundError(
+                        f"Step-4 feature matrix not found at {features_file}. "
+                        "Run scripts/step1_data_features.py first."
+                    )
+                df = pd.read_csv(features_file)
+                test_df = data_split(df, test_start, test_end)
+                if test_df.empty:
+                    raise ValueError(
+                        f"No rows in features_us.csv for {test_start}…{test_end}. "
+                        "Check the test window."
+                    )
+                for ind in tech_indicators:
+                    if ind not in test_df.columns:
+                        test_df[ind] = 0.0
+                overlay_info = {
+                    "live_prices": True,
+                    "overlay":     "features_us.csv",
+                    "message":     "Step-4 model — 25-feature matrix (real Yahoo OHLCV).",
+                    "issues":      [],
+                }
+            else:
+                # ── Legacy path: 37-feature alpha pipeline from a data job ────
+                from app.services.rl_features import build_alpha_state_pipeline
+
+                df      = pd.read_csv(data_path)
+                test_df = data_split(df, test_start, test_end)
+                tech_indicators = finrl_wrapper.get_indicators(include_rl_extras=True)
+                test_df, overlay_info = overlay_yahoo_closes(
+                    test_df, test_start, test_end, tech_indicators
+                )
+                run_meta = run.metrics_json or {}
+                alpha_in = run_meta.get("alpha_inputs") or {}
+                test_df = build_alpha_state_pipeline(
+                    test_df,
+                    xgb_run_id=alpha_in.get("xgb_run_id"),
+                    lstm_run_id=alpha_in.get("lstm_run_id"),
+                    data_job_id=run.data_job_id,
+                )
+                for ind in tech_indicators:
+                    if ind not in test_df.columns:
+                        test_df[ind] = 0.0
+
             tickers     = sorted(test_df["tic"].unique().tolist())
             stock_dim   = len(tickers)
             state_space = 1 + 2 * stock_dim + len(tech_indicators) * stock_dim
@@ -381,9 +456,7 @@ def run_backtest(
             if not hasattr(e_test, "initial_total_asset"):
                 e_test.initial_total_asset = initial_capital
 
-            df_account_value, df_actions = DRLAgent.DRL_prediction_load_from_file(
-                model_name=algorithm, environment=e_test, cwd=model_path,
-            )
+            df_account_value, df_actions = _finrl_predict(algorithm, model_path, e_test)
             account_values = df_account_value["account_value"].tolist()
             dates  = df_account_value["date"].tolist() if "date" in df_account_value else []
             trades = _parse_trades(df_actions, test_df, tickers, dates)
@@ -399,8 +472,13 @@ def run_backtest(
                 df_account_value, df_actions, tickers, tech_indicators,
                 test_df, step_log_path,
             )
-        except Exception:
+        except Exception as exc:
+            import traceback
             use_synthetic = True
+            use_synthetic_reason = f"{type(exc).__name__}: {exc}"
+            logger.warning("Real FinRL backtest failed, falling back to synthetic: %s",
+                           use_synthetic_reason)
+            logger.debug("Backtest traceback:\n%s", traceback.format_exc())
 
     # ── Synthetic backtest with friction + constraints ────────────────────────
     if (not FINRL_AVAILABLE) or use_synthetic or \
@@ -418,10 +496,17 @@ def run_backtest(
             step_log_path=step_log_path,
         )
         data_source  = "synthetic_backtest"
+        _issues = ["Synthetic portfolio engine — friction & position limits applied."]
+        if use_synthetic_reason:
+            _issues.append(f"Real model backtest failed: {use_synthetic_reason}")
         data_quality = {
             "live_prices": False,
-            "issues": ["Synthetic portfolio engine — friction & position limits applied."],
-            "message": "Re-train with Yahoo data for real model results.",
+            "issues": _issues,
+            "message": (
+                f"Fell back to synthetic — real model could not run ({use_synthetic_reason})."
+                if use_synthetic_reason else
+                "Re-train with Yahoo data for real model results."
+            ),
         }
 
     trades = _enrich_trades_with_yahoo_prices(trades, test_start, test_end)
@@ -1387,26 +1472,49 @@ def _enrich_trades_with_yahoo_prices(
 
 
 def _parse_trades(df_actions, test_df, tickers, dates) -> List[Dict]:
-    trades = []
+    """
+    Convert a FinRL action frame into a trade log.
+
+    df_actions from env.save_action_memory() is indexed by DATE (not an int),
+    with one column per ticker. Earlier code assumed an integer index and
+    crashed on the date index (caught by a bare except → 0 trades). We now
+    handle both, and build a (date, ticker) → close price lookup for speed.
+    """
+    trades: List[Dict] = []
     try:
-        for i, row in df_actions.iterrows():
-            date = dates[i] if i < len(dates) else str(i)
+        # Fast price lookup keyed by normalised date string + ticker
+        px_df = test_df.copy()
+        px_df["_d"] = pd.to_datetime(px_df["date"]).dt.strftime("%Y-%m-%d")
+        price_lookup = {
+            (r["_d"], r["tic"]): float(r["close"])
+            for _, r in px_df[["_d", "tic", "close"]].iterrows()
+        }
+
+        for pos, (idx, row) in enumerate(df_actions.iterrows()):
+            # Index may be a date (save_action_memory) or an int (legacy)
+            if isinstance(idx, (int, np.integer)):
+                raw_date = dates[idx] if idx < len(dates) else str(idx)
+            else:
+                raw_date = idx
+            date_str = pd.to_datetime(raw_date).strftime("%Y-%m-%d") \
+                       if not isinstance(raw_date, str) else \
+                       pd.to_datetime(raw_date, errors="coerce").strftime("%Y-%m-%d") \
+                       if pd.to_datetime(raw_date, errors="coerce") is not pd.NaT else raw_date
+
             for j, ticker in enumerate(tickers):
-                action_val = float(row.iloc[j]) if j < len(row) else 0
+                action_val = float(row.iloc[j]) if j < len(row) else 0.0
                 if abs(action_val) <= 0.05:
                     continue
-                price_rows = test_df[
-                    (test_df["tic"] == ticker) & (test_df["date"] == date)
-                ]
-                price = float(price_rows["close"].iloc[0]) if not price_rows.empty else 0
+                price = price_lookup.get((date_str, ticker), 0.0)
                 trades.append({
-                    "date": date, "ticker": ticker,
+                    "date":   date_str,
+                    "ticker": ticker,
                     "action": "buy" if action_val > 0 else "sell",
                     "shares": round(abs(action_val), 4),
                     "price":  round(price, 2),
                 })
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("_parse_trades failed: %s", exc)
     return trades
 
 

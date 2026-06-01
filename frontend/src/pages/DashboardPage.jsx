@@ -163,57 +163,75 @@ export default function DashboardPage() {
             <thead className="bg-gray-50 border-b border-gray-200">
               <tr>
                 <th className="text-left px-4 py-3 text-gray-500 font-medium">Algorithm</th>
+                <th className="text-left px-4 py-3 text-gray-500 font-medium">Checkpoint</th>
                 <th className="text-left px-4 py-3 text-gray-500 font-medium">Status</th>
-                <th className="text-left px-4 py-3 text-gray-500 font-medium">Final Reward</th>
-                <th className="text-left px-4 py-3 text-gray-500 font-medium">Market</th>
-                <th className="text-left px-4 py-3 text-gray-500 font-medium">Created</th>
+                <th className="text-right px-4 py-3 text-gray-500 font-medium">Sharpe</th>
+                <th className="text-right px-4 py-3 text-gray-500 font-medium">Return</th>
+                <th className="text-right px-4 py-3 text-gray-500 font-medium">Max DD</th>
+                <th className="text-right px-4 py-3 text-gray-500 font-medium">Win Rate</th>
+                <th className="text-left px-4 py-3 text-gray-500 font-medium">Trained</th>
                 <th className="text-left px-4 py-3 text-gray-500 font-medium">Actions</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-gray-100">
-              {filtered.map((run) => (
-                <tr key={run.run_id} className="hover:bg-gray-50">
-                  <td className="px-4 py-3 font-medium text-gray-900 uppercase">
-                    {run.algorithm}
-                    {run.published && (
-                      <span className="ml-2 text-xs text-teal-600 bg-teal-50 px-1.5 py-0.5 rounded-full font-normal normal-case">
-                        Live
-                      </span>
-                    )}
-                  </td>
-                  <td className="px-4 py-3">
-                    <JobStatusBadge status={run.status} />
-                  </td>
-                  <td className="px-4 py-3 text-gray-600">
-                    {run.metrics?.final_reward != null
-                      ? run.metrics.final_reward.toFixed(2)
-                      : run.metrics?.mean_auc != null
-                      ? `AUC ${run.metrics.mean_auc.toFixed(3)}`
-                      : '—'}
-                  </td>
-                  <td className="px-4 py-3 text-gray-400 text-xs uppercase">
-                    {run.market || 'us'}
-                  </td>
-                  <td className="px-4 py-3 text-gray-400 text-xs">
-                    {run.created_at ? new Date(run.created_at).toLocaleString() : '—'}
-                  </td>
-                  <td className="px-4 py-3 flex gap-3 items-center">
-                    {run.status === 'done' && (
-                      <Link
-                        to={`/backtest?run_id=${run.run_id}`}
-                        className="text-blue-600 text-xs hover:underline"
-                      >
-                        Backtest →
-                      </Link>
-                    )}
-                    {run.status === 'error' && run.error && (
-                      <span className="text-xs text-red-500 truncate max-w-xs" title={run.error}>
-                        {run.error.slice(0, 60)}{run.error.length > 60 ? '…' : ''}
-                      </span>
-                    )}
-                  </td>
-                </tr>
-              ))}
+              {filtered.map((run) => {
+                const m    = run.metrics || {}
+                const ckpt = run.data_job_id?.match(/ckpt(\d)/)?.[1]
+                const isRL = ['ppo','a2c','ddpg','td3','sac'].includes(run.algorithm)
+                return (
+                  <tr key={run.run_id} className="hover:bg-gray-50">
+                    <td className="px-4 py-3 font-medium text-gray-900 uppercase">
+                      {run.algorithm}
+                      {run.published && (
+                        <span className="ml-2 text-xs text-teal-600 bg-teal-50 px-1.5 py-0.5 rounded-full font-normal normal-case">
+                          Live
+                        </span>
+                      )}
+                    </td>
+                    <td className="px-4 py-3 text-xs text-gray-400">
+                      {ckpt ? `Ckpt ${ckpt}` : isRL ? 'Legacy' : 'Full'}
+                    </td>
+                    <td className="px-4 py-3">
+                      <JobStatusBadge status={run.status} />
+                    </td>
+                    <td className={`px-4 py-3 text-right tabular-nums text-xs font-medium ${
+                      (m.sharpe_ratio ?? 0) >= 1 ? 'text-green-600' :
+                      (m.sharpe_ratio ?? 0) >= 0 ? 'text-gray-700' : 'text-red-500'}`}>
+                      {m.sharpe_ratio != null ? m.sharpe_ratio.toFixed(3)
+                        : m.mean_auc != null ? `AUC ${m.mean_auc.toFixed(3)}` : '—'}
+                    </td>
+                    <td className={`px-4 py-3 text-right tabular-nums text-xs ${
+                      (m.total_return ?? 0) >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                      {m.total_return != null
+                        ? `${m.total_return >= 0 ? '+' : ''}${(m.total_return * 100).toFixed(1)}%`
+                        : '—'}
+                    </td>
+                    <td className={`px-4 py-3 text-right tabular-nums text-xs ${
+                      (m.max_drawdown ?? 0) < -0.2 ? 'text-red-500' : 'text-gray-500'}`}>
+                      {m.max_drawdown != null ? `${(m.max_drawdown * 100).toFixed(1)}%` : '—'}
+                    </td>
+                    <td className="px-4 py-3 text-right tabular-nums text-xs text-gray-500">
+                      {m.win_rate != null ? `${(m.win_rate * 100).toFixed(1)}%` : '—'}
+                    </td>
+                    <td className="px-4 py-3 text-gray-400 text-xs">
+                      {run.created_at ? new Date(run.created_at).toLocaleString() : '—'}
+                    </td>
+                    <td className="px-4 py-3 flex gap-3 items-center">
+                      {run.status === 'done' && (
+                        <Link to={`/backtest?run_id=${run.run_id}`}
+                          className="text-blue-600 text-xs hover:underline">
+                          Backtest →
+                        </Link>
+                      )}
+                      {run.status === 'error' && run.error && (
+                        <span className="text-xs text-red-500 truncate max-w-xs" title={run.error}>
+                          {run.error.slice(0, 50)}{run.error.length > 50 ? '…' : ''}
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                )
+              })}
             </tbody>
           </table>
         </div>
