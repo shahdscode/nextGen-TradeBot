@@ -2,8 +2,14 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.database import create_tables
 from app import finrl_wrapper
-from app.routers import data, training, backtest, paper_trading
-from app.routers import auth, ml, signals, market, research, mobile
+from app.routers import auth, paper_trading, signals, market
+
+# ML/RL routers — only loaded when heavy dependencies are installed
+try:
+    from app.routers import data, training, backtest, ml, research, mobile
+    _ml_available = True
+except ImportError:
+    _ml_available = False
 
 app = FastAPI(
     title="NextGen TradeBot API",
@@ -67,12 +73,14 @@ def info():
 
 # ── Routers ──────────────────────────────────────────────────────────────────
 app.include_router(auth.router, prefix="/api")
-app.include_router(data.router, prefix="/api")
-app.include_router(training.router, prefix="/api")
-app.include_router(backtest.router, prefix="/api")
 app.include_router(paper_trading.router, prefix="/api")
-app.include_router(ml.router, prefix="/api")
 app.include_router(signals.router, prefix="/api")
 app.include_router(market.router, prefix="/api")
-app.include_router(research.router, prefix="/api")
-app.include_router(mobile.router, prefix="/api")
+
+if _ml_available:
+    app.include_router(data.router, prefix="/api")
+    app.include_router(training.router, prefix="/api")
+    app.include_router(backtest.router, prefix="/api")
+    app.include_router(ml.router, prefix="/api")
+    app.include_router(research.router, prefix="/api")
+    app.include_router(mobile.router, prefix="/api")

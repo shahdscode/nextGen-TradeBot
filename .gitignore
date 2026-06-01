@@ -43,4 +43,4 @@ Thumbs.db
 *.log
 .logs/
 /tmp/
-.expo/
+.expo/frontend/.env
