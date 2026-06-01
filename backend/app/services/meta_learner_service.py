@@ -306,12 +306,19 @@ def compare_with_fixed_weights(
     else:
         ml_probs = [0.5] * len(val)
 
-    # Fixed weights: weighted sum of available signal columns
-    fixed_signal = sum(
-        val[k].fillna(0.5) * w
-        for k, w in fixed_weights.items() if k in val.columns
-    )
-    fw_total = sum(fixed_weights.values()) or 1.0
+    # Fixed weights: weighted sum of available signal columns.
+    # Map model names → signal column names (xgboost→xgb_signal, etc.).
+    _alias = {"xgboost": "xgb_signal", "xgb": "xgb_signal", "lstm": "lstm_signal",
+              "ppo": "ppo_signal", "a2c": "a2c_signal", "ddpg": "ddpg_signal",
+              "td3": "td3_signal", "sac": "sac_signal"}
+    fixed_signal = pd.Series(0.0, index=val.index)
+    used_w = 0.0
+    for k, w in fixed_weights.items():
+        col = _alias.get(k, k if k.endswith("_signal") else f"{k}_signal")
+        if col in val.columns:
+            fixed_signal = fixed_signal + val[col].fillna(0.5) * w
+            used_w += w
+    fw_total = used_w or 1.0
     fixed_probs = (fixed_signal / fw_total).clip(0, 1).values
 
     def _metrics(probs, actual_returns, targets):
