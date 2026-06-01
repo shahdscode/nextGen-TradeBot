@@ -71,6 +71,7 @@ def list_runs():
             error=r.error,
             published=bool(r.published) if r.published is not None else False,
             market=r.market,
+            data_job_id=r.data_job_id,
         )
         for r in runs
     ]
