@@ -417,19 +417,40 @@ def run_backtest(
                     )
                 df = pd.read_csv(features_file)
                 test_df = data_split(df, test_start, test_end)
+                overlay_msg = "Step-4 model — 25-feature matrix (cached features_us.csv)."
+                # The static feature file ends at its last build date. If the test
+                # window isn't fully covered (e.g. backtesting 2025 when the file
+                # ends 2024), download FRESH OHLCV for the window + 400d warmup and
+                # rebuild features so the REAL model runs on any window.
+                file_end = pd.to_datetime(df["date"]).max() if not df.empty else None
+                need_fresh = (
+                    test_df.empty
+                    or file_end is None
+                    or file_end < pd.Timestamp(test_end) - pd.Timedelta(days=3)
+                )
+                if need_fresh:
+                    from app.services.live_trading_service import (
+                        _download_live, _build_featured, LIVE_TICKERS)
+                    from app.services.feature_service import download_vix
+                    warmup_start = (pd.Timestamp(test_start) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+                    raw = _download_live(LIVE_TICKERS, warmup_start, test_end)
+                    vixdf = download_vix(warmup_start, test_end)
+                    fresh = _build_featured(raw, vixdf)
+                    # Match cached-CSV format: string dates (avoid Timestamp in JSON)
+                    fresh["date"] = pd.to_datetime(fresh["date"]).dt.strftime("%Y-%m-%d")
+                    test_df = data_split(fresh, test_start, test_end)
+                    overlay_msg = (f"Step-4 model — features rebuilt from fresh Yahoo "
+                                   f"download ({warmup_start}→{test_end}).")
                 if test_df.empty:
                     raise ValueError(
-                        f"No rows in features_us.csv for {test_start}…{test_end}. "
-                        "Check the test window."
-                    )
+                        f"No data available for {test_start}…{test_end} even after fresh "
+                        "download. Check the test window (markets open? future dates?).")
                 for ind in tech_indicators:
                     if ind not in test_df.columns:
                         test_df[ind] = 0.0
                 overlay_info = {
-                    "live_prices": True,
-                    "overlay":     "features_us.csv",
-                    "message":     "Step-4 model — 25-feature matrix (real Yahoo OHLCV).",
-                    "issues":      [],
+                    "live_prices": True, "overlay": "features",
+                    "message": overlay_msg, "issues": [],
                 }
             else:
                 # ── Legacy path: 37-feature alpha pipeline from a data job ────
