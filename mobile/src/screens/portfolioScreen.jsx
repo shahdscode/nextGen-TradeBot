@@ -57,7 +57,7 @@ export default function PortfolioScreen() {
       <View style={styles.header}>
         <View>
           <Text style={styles.title}>Portfolio</Text>
-          <Text style={styles.sub}>Alpaca paper account · live</Text>
+          <Text style={styles.sub}>Alpaca paper account · live · auto-rebalanced weekly</Text>
         </View>
         {status?.market_open != null && (
           <View style={[styles.pill, { backgroundColor: status.market_open ? COLORS.greenBg : COLORS.amberBg }]}>
