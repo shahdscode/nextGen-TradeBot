@@ -26,8 +26,9 @@ fi
 
 git fetch -q origin mobileapp 2>/dev/null || true
 
-WT="$(mktemp -d)"
-cleanup() { git worktree remove --force "$WT" >/dev/null 2>&1 || true; }
+# git worktree add requires a NON-existent path, so use a subdir of mktemp's dir
+WT="$(mktemp -d)/wt"
+cleanup() { git worktree remove --force "$WT" >/dev/null 2>&1 || true; git worktree prune >/dev/null 2>&1 || true; }
 trap cleanup EXIT
 
 # DETACHED worktree at the remote mobileapp tip (avoids clashing with the
