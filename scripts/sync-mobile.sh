@@ -25,6 +25,7 @@ fi
 [ "$SRC_BRANCH" = "mobileapp" ] && exit 0
 
 git fetch -q origin mobileapp 2>/dev/null || true
+git worktree prune >/dev/null 2>&1 || true   # clear any stale worktree state first
 
 # git worktree add requires a NON-existent path, so use a subdir of mktemp's dir
 WT="$(mktemp -d)/wt"
