@@ -1,8 +1,14 @@
 import axios from 'axios'
 import toast from 'react-hot-toast'
 
+// Dev: Vite proxies /api → backend (avoids Network Error when API URL is wrong).
+// Prod: set VITE_API_URL to your API host.
+const apiBase =
+  import.meta.env.VITE_API_URL ||
+  (import.meta.env.DEV ? '' : 'http://127.0.0.1:8002')
+
 const client = axios.create({
-  baseURL: import.meta.env.VITE_API_URL || 'http://127.0.0.1:8002',
+  baseURL: apiBase,
   timeout: 60000,
 })
 

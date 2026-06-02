@@ -26,6 +26,9 @@ mobile/android/
 # Runtime data (datasets, models, DB — keep locally, do not commit)
 data/
 backend/data/
+# Exception: fold definitions are small, team-critical, must be shared via git
+!backend/data/oof/
+!backend/data/oof/fold_definitions.json
 *.db
 finrl.db
 

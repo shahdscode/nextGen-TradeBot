@@ -3,14 +3,20 @@ import { useAuth } from '../context/authContext'
 import toast from 'react-hot-toast'
 
 const adminLinks = [
-  { to: '/',             label: 'Dashboard',    end: true },
-  { to: '/data',         label: 'Data' },
-  { to: '/train',        label: 'RL Train' },
-  { to: '/ml-train',     label: 'ML Train' },
-  { to: '/backtest',     label: 'Backtest' },
-  { to: '/compare',      label: 'Compare' },
-  { to: '/publish',      label: 'Publish' },
-  { to: '/paper-trading',label: 'Paper Trading' },
+  // ── Core ──────────────────────────────────────
+  { to: '/',               label: 'Dashboard',    end: true, section: null },
+  { to: '/data',           label: 'Data',                    section: null },
+  { to: '/train',          label: 'RL Train',                section: null },
+  { to: '/ml-train',       label: 'ML Train',                section: null },
+  // ── AI Pipeline ───────────────────────────────
+  { to: '/meta-learner',   label: 'Meta-Learner',            section: 'AI Pipeline' },
+  { to: '/model-weights',  label: 'Model Weights',           section: 'AI Pipeline' },
+  { to: '/performance',    label: 'Performance',             section: 'AI Pipeline' },
+  // ── Analysis ──────────────────────────────────
+  { to: '/backtest',       label: 'Backtest',                section: 'Analysis' },
+  { to: '/compare',        label: 'Compare',                 section: 'Analysis' },
+  { to: '/publish',        label: 'Publish',                 section: 'Analysis' },
+  { to: '/paper-trading',  label: 'Paper Trading',           section: 'Analysis' },
 ]
 
 const userLinks = [
@@ -43,23 +49,36 @@ export default function Layout() {
           </p>
         </div>
 
-        <nav className="flex flex-col gap-1 flex-1">
-          {links.map(({ to, label, end }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={end}
-              className={({ isActive }) =>
-                `px-3 py-2 rounded-md text-sm transition-colors ${
-                  isActive
-                    ? 'bg-gray-700 text-white'
-                    : 'text-gray-400 hover:bg-gray-800 hover:text-white'
-                }`
-              }
-            >
-              {label}
-            </NavLink>
-          ))}
+        <nav className="flex flex-col gap-0.5 flex-1">
+          {links.reduce((acc, link, idx) => {
+            // Insert section header when section changes
+            const prev = links[idx - 1]
+            if (link.section && link.section !== prev?.section) {
+              acc.push(
+                <div key={`section-${link.section}`}
+                  className="mt-3 mb-1 px-3 text-[10px] text-gray-600 uppercase tracking-widest font-semibold">
+                  {link.section}
+                </div>
+              )
+            }
+            acc.push(
+              <NavLink
+                key={link.to}
+                to={link.to}
+                end={link.end}
+                className={({ isActive }) =>
+                  `px-3 py-2 rounded-md text-sm transition-colors ${
+                    isActive
+                      ? 'bg-gray-700 text-white'
+                      : 'text-gray-400 hover:bg-gray-800 hover:text-white'
+                  }`
+                }
+              >
+                {link.label}
+              </NavLink>
+            )
+            return acc
+          }, [])}
 
           {/* Admin quick-links to user views */}
           {isAdmin && (

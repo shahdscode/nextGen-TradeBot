@@ -8,13 +8,23 @@ logger = logging.getLogger(__name__)
 _DEFAULT_JWT_SECRET = "nextgen-tradebot-secret-change-in-production"
 
 
+
+# Project root = one level above the backend/ directory
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+_DATA_ROOT = str(_PROJECT_ROOT / "data")
+
+
 class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
-    database_url: str = "sqlite:///./finrl.db"
-    data_dir: str = "./data/datasets"
-    models_dir: str = "./data/models"
-    results_dir: str = "./data/results"
-    oof_dir: str = "./data/oof"
+    # Absolute path so the API, Celery workers, and training scripts ALL use the
+    # same DB regardless of working directory. Previously relative ('./finrl.db')
+    # which silently created a second DB under backend/ that diverged from the
+    # project-root data/finrl.db used by the training scripts.
+    database_url: str = f"sqlite:///{_PROJECT_ROOT / 'data' / 'finrl.db'}"
+    data_dir: str = str(_PROJECT_ROOT / "data" / "datasets")
+    models_dir: str = str(_PROJECT_ROOT / "data" / "models")
+    results_dir: str = str(_PROJECT_ROOT / "data" / "results")
+    oof_dir: str = str(_PROJECT_ROOT / "data" / "oof")
     alpaca_api_key: str = ""
     alpaca_api_secret: str = ""
     alpaca_base_url: str = "https://paper-api.alpaca.markets"

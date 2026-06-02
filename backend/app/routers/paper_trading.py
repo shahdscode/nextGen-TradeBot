@@ -160,6 +160,27 @@ def _fallback_price(symbol: str) -> float:
     return round(50 + (base % 50000) / 100.0, 2)
 
 
+_EQUITY_PX_CACHE: dict[str, tuple[float, float]] = {}   # symbol -> (price, ts)
+
+def _equity_price(symbol: str) -> float | None:
+    """Latest daily close for a US equity via Yahoo (30s cache). None on failure."""
+    import time
+    now = time.time()
+    hit = _EQUITY_PX_CACHE.get(symbol)
+    if hit and now - hit[1] < 30:
+        return hit[0]
+    try:
+        import yfinance as yf
+        h = yf.Ticker(symbol).history(period="5d", auto_adjust=True)
+        if h.empty:
+            return None
+        px = float(h["Close"].iloc[-1])
+        _EQUITY_PX_CACHE[symbol] = (px, now)
+        return px
+    except Exception:
+        return None
+
+
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/status")
@@ -275,7 +296,10 @@ def get_portfolio():
         for symbol, pos in s["positions"].items():
             qty     = float(pos["qty"])
             entry   = float(pos["entry_price"])
-            current = _latest_price(symbol, s["timeframe"]) or _fallback_price(symbol)
+            # Price priority: MT5 gateway → Yahoo equity → deterministic fallback
+            current = (_latest_price(symbol, s["timeframe"])
+                       or _equity_price(symbol)
+                       or _fallback_price(symbol))
             mktval  = qty * current
             cost    = qty * entry
             unreal  = mktval - cost
@@ -308,6 +332,77 @@ def get_portfolio():
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post("/rebalance")
+def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
+              mode: str = "rl"):
+    """
+    Model-driven trade decision on LIVE DOW30 data.
+
+    mode="rl"   : run one trained RL model (pass run_id), use its live holdings.
+    mode="meta" : full 7-model meta-learner ensemble (run_id ignored) — assembles
+                  xgb + lstm + 5 RL signals + regime + VIX per stock, runs the
+                  meta-learner, allocates ∝ meta probability among BUY stocks.
+
+    Rebalances the paper account to the model's target. No MT5 required
+    (US equities use the Yahoo feed).
+    """
+    from app.services.live_trading_service import generate_live_allocation, generate_meta_allocation
+
+    global _SESSION_CACHE
+    s = _get_session()
+    cash = float(s.get("initial_cash") or initial_cash)
+
+    if mode == "meta":
+        rid = "meta_learner"
+        alloc = generate_meta_allocation(cash)
+    else:
+        rid = run_id or s.get("run_id")
+        if not rid:
+            raise HTTPException(status_code=400,
+                                detail="run_id required (pass run_id or start a session first)")
+        alloc = generate_live_allocation(rid, cash)
+
+    if not alloc.get("ok"):
+        raise HTTPException(status_code=400, detail=alloc.get("message", "allocation failed"))
+
+    # Rebalance paper positions to the model's target holdings
+    positions, invested = {}, 0.0
+    for tic, qty in alloc["target"].items():
+        if qty and qty > 0:
+            px = float(alloc["prices"].get(tic, 0.0))
+            if px <= 0:
+                continue
+            positions[tic] = {"qty": round(qty, 6), "entry_price": round(px, 4)}
+            invested += qty * px
+
+    s.update({
+        "run_id":       rid,
+        "symbols":      alloc["tickers"],
+        "timeframe":    "1d",
+        "positions":    positions,
+        "cash":         round(max(0.0, cash - invested), 2),
+        "running":      True,
+        "initial_cash": cash,
+    })
+    s.setdefault("session_id", str(uuid.uuid4()))
+    s.setdefault("started_at", datetime.utcnow().isoformat())
+    _SESSION_CACHE = s
+    _save_session(s)
+
+    return {
+        "ok":             True,
+        "as_of":          alloc["as_of"],
+        "algorithm":      alloc["algorithm"],
+        "message":        alloc["message"],
+        "run_id":         rid,
+        "session_id":     s["session_id"],
+        "positions_held": len(positions),
+        "invested":       round(invested, 2),
+        "cash":           s["cash"],
+        "signals":        alloc["signals"],
+    }
 
 
 @router.get("/history")

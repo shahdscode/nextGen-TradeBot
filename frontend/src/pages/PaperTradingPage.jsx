@@ -10,6 +10,9 @@ export default function PaperTradingPage() {
   const [runId, setRunId] = useState('paper-mt5-demo')
   const [symbols, setSymbols] = useState('BTCUSDm,ETHUSDm,EURUSD')
   const [timeframe, setTimeframe] = useState('M15')
+  const [rlRuns, setRlRuns] = useState([])
+  const [modelRunId, setModelRunId] = useState('')
+  const [rebal, setRebal] = useState(null)
 
   const refreshData = () => {
     return Promise.all([
@@ -23,7 +26,31 @@ export default function PaperTradingPage() {
 
   useEffect(() => {
     refreshData().finally(() => setLoading(false))
+    // Load RL runs (the only models that can trade the DOW30 portfolio live)
+    client.get('/api/train/runs').then(r => {
+      const rl = r.data.filter(x => ['ppo','a2c','ddpg','td3','sac'].includes(x.algorithm)
+                                    && x.status === 'done')
+      setRlRuns(rl)
+      if (rl.length) setModelRunId(rl[0].run_id)
+    }).catch(() => {})
   }, [])
+
+  const handleRebalance = async () => {
+    if (!modelRunId) return
+    setBusy(true)
+    setRebal(null)
+    try {
+      const r = await client.post('/api/paper-trading/rebalance', null, {
+        params: { run_id: modelRunId },
+      })
+      setRebal(r.data)
+      await refreshData()
+    } catch (e) {
+      setRebal({ ok: false, message: e.response?.data?.detail || 'Rebalance failed' })
+    } finally {
+      setBusy(false)
+    }
+  }
 
   const handleStart = async () => {
     setBusy(true)
@@ -68,8 +95,55 @@ export default function PaperTradingPage() {
         <p className="text-sm">{status?.message}</p>
       </div>
 
+      {/* Model-driven live trading on DOW30 (Yahoo feed, no MT5 needed) */}
+      <div className="bg-white border border-indigo-200 rounded-xl p-6 mb-6 max-w-3xl">
+        <div className="flex items-center gap-2 mb-1">
+          <h2 className="text-sm font-semibold text-gray-900">Model-Driven Live Trading — DOW 30</h2>
+          <span className="text-[10px] bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full font-medium">
+            live Yahoo feed
+          </span>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">
+          Runs a trained RL model on live DOW30 daily bars and rebalances the paper
+          portfolio to the allocation the model would hold right now. No MT5 required.
+        </p>
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 mb-4">
+          <select
+            value={modelRunId}
+            onChange={(e) => setModelRunId(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm"
+          >
+            {rlRuns.length === 0 && <option value="">No RL runs available</option>}
+            {rlRuns.map((r) => {
+              const ck = r.data_job_id?.match(/ckpt(\d)/)?.[1]
+              const sh = r.metrics?.sharpe_ratio
+              return (
+                <option key={r.run_id} value={r.run_id}>
+                  {r.algorithm.toUpperCase()}{ck ? ` · ckpt${ck}` : ''}
+                  {sh != null ? ` · Sharpe ${sh.toFixed(2)}` : ''} · {r.run_id.slice(0, 8)}
+                </option>
+              )
+            })}
+          </select>
+          <button
+            onClick={handleRebalance}
+            disabled={busy || !modelRunId}
+            className="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+          >
+            {busy ? 'Running model…' : 'Run Model on Live DOW30'}
+          </button>
+        </div>
+        {rebal && (
+          <div className={`text-xs rounded-lg p-3 ${rebal.ok ? 'bg-green-50 text-green-800' : 'bg-red-50 text-red-700'}`}>
+            {rebal.ok
+              ? `✓ ${rebal.message} — invested $${rebal.invested?.toLocaleString()} across ${rebal.positions_held} stocks (as of ${rebal.as_of})`
+              : `✗ ${rebal.message}`}
+          </div>
+        )}
+      </div>
+
       <div className="bg-white border border-gray-200 rounded-xl p-6 mb-6 max-w-3xl">
-        <h2 className="text-sm font-semibold text-gray-900 mb-3">MT5 Paper Session</h2>
+        <h2 className="text-sm font-semibold text-gray-900 mb-3">MT5 Paper Session (forex/crypto)</h2>
         <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-4">
           <input
             value={runId}

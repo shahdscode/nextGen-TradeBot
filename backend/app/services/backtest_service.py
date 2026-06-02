@@ -13,10 +13,13 @@ from __future__ import annotations
 
 import json
 import hashlib
+import logging
 import numpy as np
 import pandas as pd
 from pathlib import Path
 from typing import Dict, Any, List, Optional
+
+logger = logging.getLogger(__name__)
 
 from app.config import settings
 from app import finrl_wrapper
@@ -51,6 +54,43 @@ _STEP_LOG_REPLAY_RULES: Dict[str, Any] = {
     "mid_stream_start": "consumers MUST begin at step 0 or the first _full row after header",
     "missing_steps": "gaps allowed; state at step t requires replay from last anchor ≤ t",
 }
+
+
+# ── FinRL prediction (Gym/SB3 API-compatible rollout) ─────────────────────────
+
+def _finrl_predict(algorithm: str, model_path: str, env):
+    """
+    Deterministic rollout of a trained SB3 model through a FinRL StockTradingEnv.
+
+    Replaces FinRL's DRLAgent.DRL_prediction_load_from_file(), which is broken
+    against the installed gymnasium/SB3 version (it passes the (obs, info) reset
+    tuple straight into model.predict()). We handle both the Gym 5-tuple step
+    and the (obs, info) reset here.
+
+    Returns (df_account_value, df_actions) using the env's own memory savers,
+    so downstream _parse_trades / _write_finrl_step_log stay unchanged.
+    """
+    from stable_baselines3 import PPO, A2C, DDPG, TD3, SAC
+    algo_map = {"ppo": PPO, "a2c": A2C, "ddpg": DDPG, "td3": TD3, "sac": SAC}
+    cls = algo_map.get(algorithm.lower())
+    if cls is None:
+        raise ValueError(f"Unsupported RL algorithm for backtest: {algorithm}")
+
+    model = cls.load(model_path)
+
+    reset_out = env.reset()
+    obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
+    done = False
+    while not done:
+        action, _ = model.predict(obs, deterministic=True)
+        step_out = env.step(action)
+        if len(step_out) == 5:            # Gym API: obs, reward, terminated, truncated, info
+            obs, _, terminated, truncated, _ = step_out
+            done = bool(terminated or truncated)
+        else:                              # legacy 4-tuple
+            obs, _, done, _ = step_out
+
+    return env.save_asset_memory(), env.save_action_memory()
 
 
 # ── Effective price helpers ───────────────────────────────────────────────────
@@ -300,10 +340,227 @@ def run_random_baseline(
 
         daily_returns = _compute_daily_returns(account_values)
         metrics = _compute_metrics(account_values, daily_returns, initial_capital)
-        return {"account_value": account_values, "dates": dates, "metrics": metrics,
-                "strategy": "random"}
+        return {
+            "account_value": account_values, "dates": dates, "metrics": metrics,
+            "strategy": "random_timing_long_only",
+            "note": (
+                "Long-only random TIMING on the S&P 500 (5% daily flip → ~20-day avg holding). "
+                "In an up-trending market this inherits most of the market drift, so its Sharpe "
+                "is close to buy-and-hold — NOT a zero-alpha no-skill bar. It tests whether the "
+                "agent beats random entry/exit while long, not whether it beats a market-neutral "
+                "coin-flip. A long/short sign-flip baseline would sit near zero."
+            ),
+        }
     except Exception:
         return {}
+
+
+def _rl_holdings_timeseries(featured, algo, model_path, initial_cash):
+    """Run an RL model over the window once; return {date_str: {tic: holding}}."""
+    from app.services.live_trading_service import _make_env
+    from stable_baselines3 import PPO, A2C, DDPG, TD3, SAC
+    cls = {"ppo": PPO, "a2c": A2C, "ddpg": DDPG, "td3": TD3, "sac": SAC}[algo]
+    env, tics, stock_dim = _make_env(featured, initial_cash)
+    model = cls.load(model_path)
+    reset_out = env.reset()
+    obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
+    out, done = {}, False
+    while not done:
+        action, _ = model.predict(obs, deterministic=True)
+        step = env.step(action)
+        if len(step) == 5:
+            obs, _, term, trunc, _ = step; done = term or trunc
+        else:
+            obs, _, done, _ = step
+        st = np.asarray(env.state, dtype=float)
+        hold = st[1 + stock_dim: 1 + 2 * stock_dim]
+        d = str(env.date_memory[-1]) if getattr(env, "date_memory", None) else None
+        if d:
+            out[d[:10]] = {tics[i]: float(hold[i]) for i in range(stock_dim)}
+    return out, tics
+
+
+def run_meta_backtest(backtest_id, run, test_start, test_end,
+                      initial_capital=1_000_000.0, commission_pct=0.001,
+                      slippage_pct=0.001) -> Dict[str, Any]:
+    """
+    Real backtest of the meta-learner ensemble.
+
+    Builds the 7 base signals + regime + VIX per (day, stock) across the window,
+    runs the meta-learner per row, then simulates a long-only portfolio that
+    rebalances weekly to weights ∝ meta-probability among BUY stocks (p>0.5),
+    with the same friction model. Reuses all baseline / walk-forward / stress /
+    significance machinery so the result matches the standard backtest shape.
+    """
+    import pickle
+    from app.services.feature_service import FEATURE_COLUMNS, download_vix
+    from app.services.live_trading_service import _download_live, _build_featured, LIVE_TICKERS
+    from app.services.meta_learner_service import predict_meta_learner
+
+    results_dir = Path(settings.results_dir) / backtest_id
+    results_dir.mkdir(parents=True, exist_ok=True)
+    deploy = Path(settings.models_dir) / "deploy"
+    meta_path = str(Path(settings.models_dir) / "meta_learner.pkl")
+
+    if not (deploy / "xgb_deploy.pkl").exists() or not Path(meta_path).exists():
+        raise ValueError("Meta backtest needs deployable base models + meta_learner.pkl "
+                         "(run scripts/train_deployable_models.py and Step 5).")
+
+    # ── Featured data for window + warmup ─────────────────────────────────────
+    warmup_start = (pd.Timestamp(test_start) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+    raw   = _download_live(LIVE_TICKERS, warmup_start, test_end)
+    vixdf = download_vix(warmup_start, test_end)
+    featured = _build_featured(raw, vixdf)
+    featured["date"] = pd.to_datetime(featured["date"])
+    win = featured[(featured["date"] >= test_start) & (featured["date"] <= test_end)].copy()
+    if win.empty:
+        raise ValueError(f"No data for meta backtest window {test_start}…{test_end}")
+    win["d"] = win["date"].dt.strftime("%Y-%m-%d")
+    dates = sorted(win["d"].unique())
+    tics  = sorted(win["tic"].unique())
+
+    # ── XGBoost + LSTM (deployable, pooled) ───────────────────────────────────
+    with open(deploy / "xgb_deploy.pkl", "rb") as f:
+        xb = pickle.load(f); xgb_model, xgb_feats = xb["model"], xb["features"]
+    win_xgb = dict(zip(zip(win["d"], win["tic"]),
+                       xgb_model.predict_proba(win[xgb_feats].values.astype(np.float32))[:, 1]))
+
+    import torch, torch.nn as nn, pickle as pkl
+    ck = torch.load(deploy / "lstm_deploy.pt"); seq_len = ck["seq_len"]; lf = ck["features"]
+    with open(deploy / "lstm_scaler.pkl", "rb") as f:
+        lstm_scaler = pkl.load(f)
+    class _L(nn.Module):
+        def __init__(s, n):
+            super().__init__(); s.lstm = nn.LSTM(n, 64, 2, batch_first=True, dropout=0.3)
+            s.fc = nn.Linear(64, 1); s.sig = nn.Sigmoid()
+        def forward(s, x):
+            o, _ = s.lstm(x); return s.sig(s.fc(o[:, -1, :]))
+    lstm_model = _L(ck["n_features"]); lstm_model.load_state_dict(ck["state_dict"]); lstm_model.eval()
+    lstm_sig = {}
+    fe = featured.sort_values(["tic", "date"])
+    for tic in tics:
+        g = fe[fe["tic"] == tic]
+        Xs = lstm_scaler.transform(g[lf].values.astype(np.float32))
+        ds = g["date"].dt.strftime("%Y-%m-%d").tolist()
+        with torch.no_grad():
+            for i in range(seq_len - 1, len(Xs)):
+                if ds[i] in set(dates):
+                    seq = torch.tensor(Xs[i - seq_len + 1:i + 1]).unsqueeze(0)
+                    lstm_sig[(ds[i], tic)] = float(lstm_model(seq).item())
+
+    # ── 5 RL models → per-day holdings → per-stock signals ───────────────────
+    db = SessionLocal()
+    rl_sig = {}
+    for a in ["ppo", "a2c", "ddpg", "td3", "sac"]:
+        r = (db.query(Run).filter(Run.algorithm == a, Run.data_job_id == "step4_ckpt3").first()
+             or db.query(Run).filter(Run.algorithm == a, Run.status == "done").first())
+        if not r or not (r.model_path and Path(str(r.model_path) + ".zip").exists()):
+            continue
+        try:
+            holds, _ = _rl_holdings_timeseries(featured, a, r.model_path, initial_capital)
+            for d, hv in holds.items():
+                mx = max(hv.values()) if hv else 0
+                for t in tics:
+                    rl_sig[(a, d, t)] = (0.5 + 0.5 * hv.get(t, 0) / mx) if mx > 0 else 0.5
+        except Exception as exc:
+            logger.warning("meta backtest RL %s failed: %s", a, exc)
+    db.close()
+
+    # ── Regime + VIX ──────────────────────────────────────────────────────────
+    mkt = featured.groupby("date")["price_mom_20"].mean()
+    thr = float(mkt.std() * 0.5)
+    regime = {pd.Timestamp(d).strftime("%Y-%m-%d"): (int(v > thr), int(v < -thr))
+              for d, v in mkt.items()}
+    vix = dict(zip(zip(win["d"], win["tic"]), win["vix_zscore"].astype(float)))
+    close = dict(zip(zip(win["d"], win["tic"]), win["close"].astype(float)))
+
+    # ── Meta-learner probability per (day, stock) ─────────────────────────────
+    prob = {}
+    for d in dates:
+        rb, rbear = regime.get(d, (0, 0))
+        for t in tics:
+            fd = {
+                "xgb_signal": win_xgb.get((d, t), 0.5), "lstm_signal": lstm_sig.get((d, t), 0.5),
+                "ppo_signal": rl_sig.get(("ppo", d, t), 0.5), "a2c_signal": rl_sig.get(("a2c", d, t), 0.5),
+                "ddpg_signal": rl_sig.get(("ddpg", d, t), 0.5), "td3_signal": rl_sig.get(("td3", d, t), 0.5),
+                "sac_signal": rl_sig.get(("sac", d, t), 0.5), "regime_bull": rb, "regime_bear": rbear,
+                "sentiment_score": 0.0, "vix_zscore": vix.get((d, t), 0.0),
+            }
+            prob[(d, t)] = float(predict_meta_learner(meta_path, fd)["probability"])
+
+    # ── Simulate long-only, weekly rebalance ∝ prob among BUYs (p>0.5) ───────
+    cash = float(initial_capital); shares = {t: 0.0 for t in tics}
+    account_values, trades = [], []
+    for i, d in enumerate(dates):
+        px = {t: close.get((d, t), 0.0) for t in tics}
+        pv = cash + sum(shares[t] * px[t] for t in tics if px[t] > 0)
+        if i % 5 == 0:   # weekly rebalance
+            buys = {t: prob[(d, t)] for t in tics if prob.get((d, t), 0) > 0.5 and px[t] > 0}
+            wsum = sum(buys.values())
+            for t in tics:
+                if px[t] <= 0:
+                    continue
+                tgt_val = pv * (buys.get(t, 0.0) / wsum) if wsum > 0 else 0.0
+                cur_val = shares[t] * px[t]
+                delta_val = tgt_val - cur_val
+                if abs(delta_val) < pv * 0.01:   # ignore tiny rebalances
+                    continue
+                dshares = delta_val / px[t]
+                if dshares > 0:
+                    eff = _buy_price(px[t], commission_pct, slippage_pct)
+                    cost = dshares * eff
+                    if cost <= cash:
+                        cash -= cost; shares[t] += dshares
+                        trades.append({"date": d, "ticker": t, "action": "buy",
+                                       "shares": round(dshares, 4), "price": round(px[t], 2),
+                                       "effective_price": round(eff, 4)})
+                else:
+                    eff = _sell_price(px[t], commission_pct, slippage_pct)
+                    cash += -dshares * eff; shares[t] += dshares
+                    trades.append({"date": d, "ticker": t, "action": "sell",
+                                   "shares": round(-dshares, 4), "price": round(px[t], 2),
+                                   "effective_price": round(eff, 4)})
+        account_values.append(round(cash + sum(shares[t] * px[t] for t in tics if px[t] > 0), 2))
+
+    # ── Metrics + full report (reuse standard machinery) ─────────────────────
+    daily_returns = _compute_daily_returns(account_values)
+    metrics = _compute_metrics(account_values, daily_returns, initial_capital, trades)
+    seed = int(hashlib.sha256(run.id.encode()).hexdigest()[:8], 16)
+    benchmark = fetch_sp500_benchmark(test_start, test_end, initial_capital, commission_pct, slippage_pct)
+    result = {
+        "initial_capital": initial_capital,
+        "account_value":   account_values,
+        "daily_return":    [round(r, 6) for r in daily_returns],
+        "dates":           dates,
+        "metrics":         metrics,
+        "trades":          trades,
+        "benchmark":       benchmark,
+        "baselines": {
+            "buy_hold":      benchmark,
+            "sma_crossover": run_sma_crossover_baseline(test_start, test_end, initial_capital, commission_pct, slippage_pct),
+            "momentum":      run_momentum_baseline(test_start, test_end, initial_capital, commission_pct, slippage_pct),
+            "equal_weight":  run_equal_weight_baseline(test_start, test_end, initial_capital, commission_pct, slippage_pct),
+            "random":        run_random_baseline(test_start, test_end, initial_capital, commission_pct, slippage_pct, seed),
+        },
+        "walk_forward_periods": _walk_forward_rolling(account_values, dates, initial_capital)["windows"],
+        "walk_forward_summary": _walk_forward_rolling(account_values, dates, initial_capital)["summary"],
+        "stress_tests":    _run_stress_scenarios(account_values, dates, initial_capital, commission_pct, slippage_pct, seed),
+        "rl_sanity":       _rl_sanity_checks(trades, account_values, dates),
+        "regime_analysis": _regime_analysis(daily_returns, dates, trades),
+        "data_source":     "meta_learner_ensemble",
+        "data_quality":    {"live_prices": True,
+                            "message": f"Meta-learner ensemble — 7 base signals per stock, "
+                                       f"weekly rebalance, fresh Yahoo data {warmup_start}→{test_end}.",
+                            "issues": []},
+        "transaction_costs": {"commission_pct": commission_pct, "slippage_pct": slippage_pct,
+                              "note": "Long-only, weekly rebalance to weights ∝ meta-probability among BUY stocks."},
+        "methodology_notes": {"model": "Meta-learner stacking ensemble (7 base models + regime + VIX)",
+                              "allocation": "Long-only, weekly rebalance ∝ calibrated meta-probability (p>0.5)."},
+    }
+    metrics.update(_distribution_stats(daily_returns))
+    with open(results_dir / "result.json", "w") as f:
+        json.dump(result, f)
+    return result
 
 
 # ── Main backtest entry point ─────────────────────────────────────────────────
@@ -330,6 +587,13 @@ def run_backtest(
     if not run:
         raise ValueError(f"Run {run_id} not found")
 
+    # Meta-learner is a stacking model (.pkl), not a FinRL portfolio policy (.zip).
+    # Route it to a dedicated backtest that simulates the ensemble allocation,
+    # instead of silently falling back to the synthetic engine.
+    if (run.algorithm or "").lower() == "meta_learner":
+        return run_meta_backtest(backtest_id, run, test_start, test_end,
+                                 initial_capital, commission_pct, slippage_pct)
+
     data_path   = Path(settings.data_dir) / run.data_job_id / "data.csv"
     model_path  = run.model_path
     algorithm   = run.algorithm
@@ -338,10 +602,15 @@ def run_backtest(
 
     trades: List[Dict] = []
     use_synthetic = False
+    use_synthetic_reason: Optional[str] = None
     data_source   = "unknown"
     data_quality: Dict = {}
 
     step_log_path = str(results_dir / "step_log.jsonl")
+
+    # Step-4 models were trained with the 25-feature matrix (features_us.csv),
+    # NOT the 37-feature alpha pipeline. Detect them so we build a matching env.
+    is_step4 = (run.data_job_id or "").startswith("step4")
 
     # ── Try real FinRL model ──────────────────────────────────────────────────
     if FINRL_AVAILABLE and model_path and Path(str(model_path) + ".zip").exists():
@@ -350,25 +619,76 @@ def run_backtest(
             from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
             from finrl.agents.stablebaselines3.models import DRLAgent
 
-            from app.services.rl_features import build_alpha_state_pipeline
+            if is_step4:
+                # ── Step-4 path: 25 raw features from the OOF feature matrix ──
+                from app.services.feature_service import FEATURE_COLUMNS
+                tech_indicators = list(FEATURE_COLUMNS)  # 25 features, single source of truth
 
-            df      = pd.read_csv(data_path)
-            test_df = data_split(df, test_start, test_end)
-            tech_indicators = finrl_wrapper.get_indicators(include_rl_extras=True)
-            test_df, overlay_info = overlay_yahoo_closes(
-                test_df, test_start, test_end, tech_indicators
-            )
-            run_meta = run.metrics_json or {}
-            alpha_in = run_meta.get("alpha_inputs") or {}
-            test_df = build_alpha_state_pipeline(
-                test_df,
-                xgb_run_id=alpha_in.get("xgb_run_id"),
-                lstm_run_id=alpha_in.get("lstm_run_id"),
-                data_job_id=run.data_job_id,
-            )
-            for ind in tech_indicators:
-                if ind not in test_df.columns:
-                    test_df[ind] = 0.0
+                features_file = Path(settings.oof_dir) / "features_us.csv"
+                if not features_file.exists():
+                    raise FileNotFoundError(
+                        f"Step-4 feature matrix not found at {features_file}. "
+                        "Run scripts/step1_data_features.py first."
+                    )
+                df = pd.read_csv(features_file)
+                test_df = data_split(df, test_start, test_end)
+                overlay_msg = "Step-4 model — 25-feature matrix (cached features_us.csv)."
+                # The static feature file ends at its last build date. If the test
+                # window isn't fully covered (e.g. backtesting 2025 when the file
+                # ends 2024), download FRESH OHLCV for the window + 400d warmup and
+                # rebuild features so the REAL model runs on any window.
+                file_end = pd.to_datetime(df["date"]).max() if not df.empty else None
+                need_fresh = (
+                    test_df.empty
+                    or file_end is None
+                    or file_end < pd.Timestamp(test_end) - pd.Timedelta(days=3)
+                )
+                if need_fresh:
+                    from app.services.live_trading_service import (
+                        _download_live, _build_featured, LIVE_TICKERS)
+                    from app.services.feature_service import download_vix
+                    warmup_start = (pd.Timestamp(test_start) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+                    raw = _download_live(LIVE_TICKERS, warmup_start, test_end)
+                    vixdf = download_vix(warmup_start, test_end)
+                    fresh = _build_featured(raw, vixdf)
+                    # Match cached-CSV format: string dates (avoid Timestamp in JSON)
+                    fresh["date"] = pd.to_datetime(fresh["date"]).dt.strftime("%Y-%m-%d")
+                    test_df = data_split(fresh, test_start, test_end)
+                    overlay_msg = (f"Step-4 model — features rebuilt from fresh Yahoo "
+                                   f"download ({warmup_start}→{test_end}).")
+                if test_df.empty:
+                    raise ValueError(
+                        f"No data available for {test_start}…{test_end} even after fresh "
+                        "download. Check the test window (markets open? future dates?).")
+                for ind in tech_indicators:
+                    if ind not in test_df.columns:
+                        test_df[ind] = 0.0
+                overlay_info = {
+                    "live_prices": True, "overlay": "features",
+                    "message": overlay_msg, "issues": [],
+                }
+            else:
+                # ── Legacy path: 37-feature alpha pipeline from a data job ────
+                from app.services.rl_features import build_alpha_state_pipeline
+
+                df      = pd.read_csv(data_path)
+                test_df = data_split(df, test_start, test_end)
+                tech_indicators = finrl_wrapper.get_indicators(include_rl_extras=True)
+                test_df, overlay_info = overlay_yahoo_closes(
+                    test_df, test_start, test_end, tech_indicators
+                )
+                run_meta = run.metrics_json or {}
+                alpha_in = run_meta.get("alpha_inputs") or {}
+                test_df = build_alpha_state_pipeline(
+                    test_df,
+                    xgb_run_id=alpha_in.get("xgb_run_id"),
+                    lstm_run_id=alpha_in.get("lstm_run_id"),
+                    data_job_id=run.data_job_id,
+                )
+                for ind in tech_indicators:
+                    if ind not in test_df.columns:
+                        test_df[ind] = 0.0
+
             tickers     = sorted(test_df["tic"].unique().tolist())
             stock_dim   = len(tickers)
             state_space = 1 + 2 * stock_dim + len(tech_indicators) * stock_dim
@@ -381,9 +701,7 @@ def run_backtest(
             if not hasattr(e_test, "initial_total_asset"):
                 e_test.initial_total_asset = initial_capital
 
-            df_account_value, df_actions = DRLAgent.DRL_prediction_load_from_file(
-                model_name=algorithm, environment=e_test, cwd=model_path,
-            )
+            df_account_value, df_actions = _finrl_predict(algorithm, model_path, e_test)
             account_values = df_account_value["account_value"].tolist()
             dates  = df_account_value["date"].tolist() if "date" in df_account_value else []
             trades = _parse_trades(df_actions, test_df, tickers, dates)
@@ -399,8 +717,13 @@ def run_backtest(
                 df_account_value, df_actions, tickers, tech_indicators,
                 test_df, step_log_path,
             )
-        except Exception:
+        except Exception as exc:
+            import traceback
             use_synthetic = True
+            use_synthetic_reason = f"{type(exc).__name__}: {exc}"
+            logger.warning("Real FinRL backtest failed, falling back to synthetic: %s",
+                           use_synthetic_reason)
+            logger.debug("Backtest traceback:\n%s", traceback.format_exc())
 
     # ── Synthetic backtest with friction + constraints ────────────────────────
     if (not FINRL_AVAILABLE) or use_synthetic or \
@@ -418,10 +741,17 @@ def run_backtest(
             step_log_path=step_log_path,
         )
         data_source  = "synthetic_backtest"
+        _issues = ["Synthetic portfolio engine — friction & position limits applied."]
+        if use_synthetic_reason:
+            _issues.append(f"Real model backtest failed: {use_synthetic_reason}")
         data_quality = {
             "live_prices": False,
-            "issues": ["Synthetic portfolio engine — friction & position limits applied."],
-            "message": "Re-train with Yahoo data for real model results.",
+            "issues": _issues,
+            "message": (
+                f"Fell back to synthetic — real model could not run ({use_synthetic_reason})."
+                if use_synthetic_reason else
+                "Re-train with Yahoo data for real model results."
+            ),
         }
 
     trades = _enrich_trades_with_yahoo_prices(trades, test_start, test_end)
@@ -450,9 +780,12 @@ def run_backtest(
     sanity = _rl_sanity_checks(trades, account_values, dates)
 
     # ── Overfitting report ───────────────────────────────────────────────────
+    # Tag the engine so the report evaluates val/train with the SAME engine.
+    metrics["_data_source"] = data_source
     overfitting_report = _build_overfitting_report(
         run, metrics, test_start, test_end, initial_capital, commission_pct, slippage_pct
     )
+    metrics.pop("_data_source", None)   # internal flag, not for output
 
     # ── Distribution stats + bootstrap CI ───────────────────────────────────
     # Done after baselines so these heavier stats don't slow sub-period loops
@@ -477,6 +810,14 @@ def run_backtest(
         "total_round_trip_pct": round((commission_pct + slippage_pct) * 2 * 100, 3),
         "max_position_pct":    max_position_pct,
         "cooldown_days":       cooldown_days,
+        "cooldown_note": (
+            f"cooldown_days={cooldown_days} and max_position_pct constrain the SYNTHETIC "
+            "baseline engine and shape the RL training reward (turnover penalty). They are "
+            "NOT applied as a post-hoc filter to a trained RL agent's executed actions — the "
+            "agent may rebalance the same ticker on consecutive days. Per-trade rows reflect "
+            "the agent's raw allocation changes, so consecutive same-ticker trades are expected "
+            "and do not violate a hard cooldown (there is none on the live policy)."
+        ),
         "note": (
             f"Base friction: +{commission_pct*100:.2f}% commission per leg. "
             f"Slippage: Almgren-Chriss sqrt model — base {slippage_pct*100:.2f}% "
@@ -1261,6 +1602,64 @@ def _rl_sanity_checks(
     }
 
 
+def _real_model_account_values(
+    run, test_start: str, test_end: str,
+    initial_capital: float, commission_pct: float, slippage_pct: float,
+) -> Optional[List[float]]:
+    """
+    Run the trained model on [test_start, test_end] and return account values.
+    Lean version of run_backtest's real-model block (no step log / trades), used
+    by the overfitting report so train/val/test all use the SAME real model.
+    Returns None on any failure (caller falls back to the synthetic engine).
+    """
+    model_path = run.model_path
+    if not (FINRL_AVAILABLE and model_path and Path(str(model_path) + ".zip").exists()):
+        return None
+    try:
+        from finrl.meta.preprocessor.preprocessors import data_split
+        from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+
+        is_step4 = (run.data_job_id or "").startswith("step4")
+        if is_step4:
+            from app.services.feature_service import FEATURE_COLUMNS
+            tech = list(FEATURE_COLUMNS)
+            ff = Path(settings.oof_dir) / "features_us.csv"
+            if not ff.exists():
+                return None
+            df = pd.read_csv(ff)
+            test_df = data_split(df, test_start, test_end)
+            if test_df.empty:
+                return None
+            for ind in tech:
+                if ind not in test_df.columns:
+                    test_df[ind] = 0.0
+        else:
+            from app.services.rl_features import build_alpha_state_pipeline
+            df = pd.read_csv(Path(settings.data_dir) / run.data_job_id / "data.csv")
+            test_df = data_split(df, test_start, test_end)
+            tech = finrl_wrapper.get_indicators(include_rl_extras=True)
+            test_df, _ = overlay_yahoo_closes(test_df, test_start, test_end, tech)
+            ai = (run.metrics_json or {}).get("alpha_inputs") or {}
+            test_df = build_alpha_state_pipeline(test_df, ai.get("xgb_run_id"),
+                                                 ai.get("lstm_run_id"), run.data_job_id)
+            for ind in tech:
+                if ind not in test_df.columns:
+                    test_df[ind] = 0.0
+
+        tickers     = sorted(test_df["tic"].unique().tolist())
+        stock_dim   = len(tickers)
+        state_space = 1 + 2 * stock_dim + len(tech) * stock_dim
+        env_kwargs  = finrl_env_kwargs(stock_dim, state_space, tech, initial_capital)
+        env_kwargs["buy_cost_pct"]  = [commission_pct + slippage_pct] * stock_dim
+        env_kwargs["sell_cost_pct"] = [commission_pct + slippage_pct] * stock_dim
+        e = StockTradingEnv(df=test_df, **env_kwargs)
+        dav, _ = _finrl_predict(run.algorithm, model_path, e)
+        return dav["account_value"].tolist()
+    except Exception as exc:
+        logger.debug("real-model window eval failed (%s–%s): %s", test_start, test_end, exc)
+        return None
+
+
 # ── Overfitting report ────────────────────────────────────────────────────────
 
 def _build_overfitting_report(
@@ -1277,49 +1676,49 @@ def _build_overfitting_report(
     - Training period : from run.metrics_json["train_window"] if available
     - Validation period: auto-inferred as 6 months before test_start
     - Test period      : current backtest result (already computed)
-    All periods use the same synthetic engine for apples-to-apples comparison.
+
+    All periods are evaluated with the SAME engine as the test result: if the
+    test used the real model, validation/train also use the real model (so the
+    comparison is valid). Previously train/val used a synthetic engine while
+    test used the real model — an apples-to-oranges comparison that produced
+    nonsensical divergence (e.g. val -8% vs test +79%).
     """
     train_window: Dict = {}
     if run.metrics_json:
         train_window = run.metrics_json.get("train_window", {})
 
-    # ── Validation period ─────────────────────────────────────────────────────
-    val_metrics:  Dict = {}
-    val_start_str = val_end_str = "—"
-    try:
-        val_end_ts    = pd.Timestamp(test_start) - pd.Timedelta(days=1)
-        val_start_ts  = val_end_ts - pd.DateOffset(months=6)
-        val_start_str = val_start_ts.strftime("%Y-%m-%d")
-        val_end_str   = val_end_ts.strftime("%Y-%m-%d")
-        v_vals, v_trades, _ = _generate_synthetic_portfolio(
-            run_id=run.id,
-            test_start=val_start_str, test_end=val_end_str,
-            initial_capital=initial_capital,
-            commission_pct=commission_pct, slippage_pct=slippage_pct,
-            max_position_pct=0.20, cooldown_days=5,
-        )
-        v_ret      = _compute_daily_returns(v_vals)
-        val_metrics = _compute_metrics(v_vals, v_ret, initial_capital, v_trades)
-    except Exception:
-        pass
+    test_is_real = (test_metrics.get("_data_source") == "finrl_model")
+
+    def _eval_window(start: str, end: str, seed_suffix: str) -> Dict:
+        # Prefer the real model when the test result is real, so all periods
+        # are comparable. Fall back to the synthetic engine otherwise.
+        if test_is_real:
+            vals = _real_model_account_values(run, start, end, initial_capital,
+                                              commission_pct, slippage_pct)
+            if vals and len(vals) > 5:
+                return _compute_metrics(vals, _compute_daily_returns(vals), initial_capital, [])
+        try:
+            vv, vt, _ = _generate_synthetic_portfolio(
+                run_id=run.id + seed_suffix, test_start=start, test_end=end,
+                initial_capital=initial_capital, commission_pct=commission_pct,
+                slippage_pct=slippage_pct, max_position_pct=0.20, cooldown_days=5)
+            return _compute_metrics(vv, _compute_daily_returns(vv), initial_capital, vt)
+        except Exception:
+            return {}
+
+    # ── Validation period (6 months before test) ──────────────────────────────
+    val_end_ts    = pd.Timestamp(test_start) - pd.Timedelta(days=1)
+    val_start_ts  = val_end_ts - pd.DateOffset(months=6)
+    val_start_str = val_start_ts.strftime("%Y-%m-%d")
+    val_end_str   = val_end_ts.strftime("%Y-%m-%d")
+    val_metrics   = _eval_window(val_start_str, val_end_str, "_val")
 
     # ── Training period ───────────────────────────────────────────────────────
     train_metrics:  Dict = {}
     train_start_str = train_window.get("start", "")
     train_end_str   = train_window.get("end",   "")
     if train_start_str and train_end_str:
-        try:
-            t_vals, t_trades, _ = _generate_synthetic_portfolio(
-                run_id=run.id + "_tr",
-                test_start=train_start_str, test_end=train_end_str,
-                initial_capital=initial_capital,
-                commission_pct=commission_pct, slippage_pct=slippage_pct,
-                max_position_pct=0.20, cooldown_days=5,
-            )
-            t_ret        = _compute_daily_returns(t_vals)
-            train_metrics = _compute_metrics(t_vals, t_ret, initial_capital, t_trades)
-        except Exception:
-            pass
+        train_metrics = _eval_window(train_start_str, train_end_str, "_tr")
 
     # ── Degradation gaps ──────────────────────────────────────────────────────
     tr  = train_metrics.get("total_return")
@@ -1332,13 +1731,18 @@ def _build_overfitting_report(
 
     primary_gap = gaps.get("val_to_test", gaps.get("train_to_test", 0.0))
     if primary_gap > 0.20:
-        verdict = "⚠ Likely overfitting — large performance drop from validation to test"
+        verdict = ("Large positive train/validation-to-test gap (>20pp): strong evidence "
+                   "of overfitting or regime-specific fit; treat test results with caution.")
     elif primary_gap > 0.10:
-        verdict = "~ Moderate degradation — typical for RL agents on unseen regimes"
+        verdict = ("Moderate degradation (10–20pp) from validation to test — consistent with "
+                   "RL agents encountering unseen market regimes.")
     elif primary_gap > -0.02:
-        verdict = "✓ Mild / no degradation — reasonable out-of-sample generalization"
+        verdict = ("Minimal degradation (≤10pp): performance is broadly stable across the "
+                   "validation and test periods.")
     else:
-        verdict = "✓ Improving out-of-sample — strategy may be genuinely adaptive"
+        verdict = ("Test outperforms validation: performance divergence indicates sensitivity "
+                   "to differing market-regime conditions across the two windows, not a "
+                   "monotonic generalization signal — interpret with regime context.")
 
     return {
         "train": {
@@ -1387,26 +1791,49 @@ def _enrich_trades_with_yahoo_prices(
 
 
 def _parse_trades(df_actions, test_df, tickers, dates) -> List[Dict]:
-    trades = []
+    """
+    Convert a FinRL action frame into a trade log.
+
+    df_actions from env.save_action_memory() is indexed by DATE (not an int),
+    with one column per ticker. Earlier code assumed an integer index and
+    crashed on the date index (caught by a bare except → 0 trades). We now
+    handle both, and build a (date, ticker) → close price lookup for speed.
+    """
+    trades: List[Dict] = []
     try:
-        for i, row in df_actions.iterrows():
-            date = dates[i] if i < len(dates) else str(i)
+        # Fast price lookup keyed by normalised date string + ticker
+        px_df = test_df.copy()
+        px_df["_d"] = pd.to_datetime(px_df["date"]).dt.strftime("%Y-%m-%d")
+        price_lookup = {
+            (r["_d"], r["tic"]): float(r["close"])
+            for _, r in px_df[["_d", "tic", "close"]].iterrows()
+        }
+
+        for pos, (idx, row) in enumerate(df_actions.iterrows()):
+            # Index may be a date (save_action_memory) or an int (legacy)
+            if isinstance(idx, (int, np.integer)):
+                raw_date = dates[idx] if idx < len(dates) else str(idx)
+            else:
+                raw_date = idx
+            date_str = pd.to_datetime(raw_date).strftime("%Y-%m-%d") \
+                       if not isinstance(raw_date, str) else \
+                       pd.to_datetime(raw_date, errors="coerce").strftime("%Y-%m-%d") \
+                       if pd.to_datetime(raw_date, errors="coerce") is not pd.NaT else raw_date
+
             for j, ticker in enumerate(tickers):
-                action_val = float(row.iloc[j]) if j < len(row) else 0
+                action_val = float(row.iloc[j]) if j < len(row) else 0.0
                 if abs(action_val) <= 0.05:
                     continue
-                price_rows = test_df[
-                    (test_df["tic"] == ticker) & (test_df["date"] == date)
-                ]
-                price = float(price_rows["close"].iloc[0]) if not price_rows.empty else 0
+                price = price_lookup.get((date_str, ticker), 0.0)
                 trades.append({
-                    "date": date, "ticker": ticker,
+                    "date":   date_str,
+                    "ticker": ticker,
                     "action": "buy" if action_val > 0 else "sell",
                     "shares": round(abs(action_val), 4),
                     "price":  round(price, 2),
                 })
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("_parse_trades failed: %s", exc)
     return trades
 
 
@@ -1662,10 +2089,14 @@ def _compute_metrics(
     sharpe = float(returns.mean() / returns.std() * np.sqrt(252)) \
              if returns.std() > 1e-10 else 0.0
 
-    # Sortino (downside deviation only)
-    neg      = returns[returns < 0]
-    down_std = float(np.std(neg) * np.sqrt(252)) if len(neg) > 1 else 1e-9
-    sortino  = float(returns.mean() * np.sqrt(252) / down_std)
+    # Sortino (downside deviation only) — annualized the SAME way as Sharpe
+    # (×√252 on the daily mean/downside-std ratio). Previous code pre-annualized
+    # the denominator AND multiplied the numerator by √252, cancelling the
+    # annualization → Sortino came out ~Sharpe/√252 (e.g. 0.18 vs 1.88). Bug.
+    neg          = returns[returns < 0]
+    down_std_day = float(np.std(neg)) if len(neg) > 1 else 1e-9   # DAILY downside dev
+    sortino      = float(returns.mean() / (down_std_day + 1e-12) * np.sqrt(252)) \
+                   if down_std_day > 1e-10 else 0.0
 
     # Max drawdown
     peak, max_dd = account_values[0], 0.0
@@ -1719,8 +2150,14 @@ def _compute_metrics(
         if trade_rets:
             m["avg_trade_return"] = round(float(np.mean(trade_rets)), 4)
 
+        # "active_days_pct" = fraction of days on which a trade occurred (trade
+        # FREQUENCY), NOT capital deployed. Previously mislabeled "exposure_pct",
+        # which readers misread as "mostly in cash". Keep exposure_pct as an alias
+        # for backward compat but make the meaning explicit.
         trade_dates = set(t.get("date", "") for t in trades)
-        m["exposure_pct"] = round(float(min(len(trade_dates) / n_days, 1.0)), 4) if n_days > 0 else 0.0
+        active = round(float(min(len(trade_dates) / n_days, 1.0)), 4) if n_days > 0 else 0.0
+        m["active_days_pct"] = active
+        m["exposure_pct"]    = active   # legacy alias (trade-day frequency)
 
         # Use effective_price for notional volume so turnover reflects actual cash flow
         total_traded = sum(

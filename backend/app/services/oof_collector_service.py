@@ -389,11 +389,11 @@ def _collect_lstm_oof_df(
                 X_tr, y_tr = prepare_xy(train_fold)
                 X_te, _    = prepare_xy(test_fold)
 
-                # Scaler on training fold ONLY
+                # Scaler fitted on training fold ONLY (no leakage)
                 scaler = StandardScaler()
-                X_tr = scaler.fit_transform(X_tr)
-                X_te = scaler.transform(X_te)
-                n_features = X_tr.shape[1]
+                X_tr_sc = scaler.fit_transform(X_tr)
+                X_te_sc = scaler.transform(X_te)
+                n_features = X_tr_sc.shape[1]
 
                 def _seqs(X, y=None):
                     xs, ys = [], []
@@ -404,9 +404,18 @@ def _collect_lstm_oof_df(
                     return (np.array(xs, dtype=np.float32),
                             np.array(ys, dtype=np.float32) if y is not None else None)
 
-                X_tr_s, y_tr_s = _seqs(X_tr, y_tr)
-                X_te_s, _      = _seqs(X_te)
-                if len(X_tr_s) < 10 or len(X_te_s) == 0:
+                X_tr_s, y_tr_s = _seqs(X_tr_sc, y_tr)
+                if len(X_tr_s) < 10:
+                    continue
+
+                # CRITICAL FIX: 1-month test folds (~21 days) < seq_len=30.
+                # Prepend last (seq_len-1) training rows as context so the LSTM
+                # has a full lookback window for every test prediction.
+                # No leakage: context rows are past observations; model is frozen.
+                context    = X_tr_sc[-(seq_len - 1):]
+                X_te_ctx   = np.vstack([context, X_te_sc])
+                X_te_s, _  = _seqs(X_te_ctx)          # now len == len(test_fold)
+                if len(X_te_s) == 0:
                     continue
 
                 model = _LSTMNet(n_features).to(device)
@@ -584,12 +593,48 @@ def _merge_oof_df(
 # ── Internal helper ─────────────────────────────────────────────────────────
 
 def _load_df_from_dir(data_dir: str) -> pd.DataFrame:
-    """Load the most-recent parquet or CSV from *data_dir* (recursive search)."""
+    """
+    Load the enriched multi-ticker dataset from *data_dir*.
+
+    Priority order:
+    1. all_tickers_enriched.csv  — produced by Person 1 data download (preferred)
+    2. all_tickers_2019_2024.csv — fallback if enriched not yet present
+    3. Most-recent parquet in directory
+    4. Most-recent CSV in directory (last resort)
+
+    The old sorted(glob)[-1] approach picked a random small per-job CSV
+    because UUID names sort after 'a', making them alphabetically later
+    than all_tickers_enriched.csv.
+    """
     import glob
-    for ext in ("*.parquet", "*.csv"):
-        matches = sorted(glob.glob(os.path.join(data_dir, "**", ext), recursive=True))
-        if matches:
-            path = matches[-1]
-            logger.info("Loading data from %s", path)
-            return pd.read_parquet(path) if path.endswith(".parquet") else pd.read_csv(path)
-    raise FileNotFoundError(f"No parquet or CSV found under {data_dir!r}")
+
+    # Priority 1 & 2: known good file names
+    for fname in ("all_tickers_enriched.csv", "all_tickers_2019_2024.csv"):
+        candidate = os.path.join(data_dir, fname)
+        if os.path.exists(candidate):
+            size_mb = os.path.getsize(candidate) / 1024 / 1024
+            logger.info("Loading enriched dataset: %s  (%.1f MB)", candidate, size_mb)
+            return pd.read_csv(candidate)
+
+    # Priority 3: most-recent parquet (largest = most complete)
+    parquets = glob.glob(os.path.join(data_dir, "**", "*.parquet"), recursive=True)
+    if parquets:
+        path = max(parquets, key=os.path.getsize)
+        logger.info("Loading parquet: %s", path)
+        return pd.read_parquet(path)
+
+    # Priority 4: largest CSV (not smallest) to avoid small per-job files
+    csvs = glob.glob(os.path.join(data_dir, "**", "*.csv"), recursive=True)
+    if csvs:
+        path = max(csvs, key=os.path.getsize)
+        size_mb = os.path.getsize(path) / 1024 / 1024
+        logger.warning(
+            "No enriched dataset found — loading largest CSV: %s (%.1f MB). "
+            "Run Person 1 data download first for best results.", path, size_mb
+        )
+        return pd.read_csv(path)
+
+    raise FileNotFoundError(
+        f"No dataset found under {data_dir!r}. "
+        "Run the Person 1 data download script first to generate all_tickers_enriched.csv."
+    )

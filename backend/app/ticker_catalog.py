@@ -38,11 +38,9 @@ EGX_30_TICKERS = [
     "ACGC.CA",  # Arab Cotton Ginning
     "ISPH.CA",  # Integrated Diagnostics Holdings
     "GBCO.CA",  # GB Auto
-    "GTHE.CA",  # Ghabbour Auto
     "MFPC.CA",  # Misr Fertilizers Production Company
-    "ABIS.CA",  # Alexandria Spinning
-    "BICO.CA",  # Bisco Egypt
     "BTFH.CA",  # Biotechnology
+    # Removed: GTHE.CA, ABIS.CA, BICO.CA, MNHD.CA — delisted (no data on Yahoo Finance)
 ]
 
 EGX_30_BENCHMARK = "^CASE30"

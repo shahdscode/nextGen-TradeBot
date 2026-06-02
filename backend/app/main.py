@@ -31,6 +31,12 @@ def on_startup():
     create_tables()
     # Ensure default admin exists for first run
     _seed_default_admin()
+    # Daily auto-rebalance for paper trading (lightweight daemon thread)
+    try:
+        from app.services.scheduler_service import start_scheduler
+        start_scheduler()
+    except Exception:
+        pass
 
 
 def _seed_default_admin():
