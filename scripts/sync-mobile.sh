@@ -10,6 +10,12 @@
 # Usage:  bash scripts/sync-mobile.sh [commit]   (defaults to HEAD)
 set -uo pipefail
 
+# CRITICAL: git hooks export GIT_DIR/GIT_WORK_TREE/etc into child processes,
+# which breaks `git worktree add` (it thinks it's already inside a worktree).
+# Clear them so git commands here operate on the repo normally.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR \
+      GIT_INDEX_VERSION GIT_REFLOG_ACTION 2>/dev/null || true
+
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
