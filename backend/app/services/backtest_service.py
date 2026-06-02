@@ -340,8 +340,17 @@ def run_random_baseline(
 
         daily_returns = _compute_daily_returns(account_values)
         metrics = _compute_metrics(account_values, daily_returns, initial_capital)
-        return {"account_value": account_values, "dates": dates, "metrics": metrics,
-                "strategy": "random"}
+        return {
+            "account_value": account_values, "dates": dates, "metrics": metrics,
+            "strategy": "random_timing_long_only",
+            "note": (
+                "Long-only random TIMING on the S&P 500 (5% daily flip → ~20-day avg holding). "
+                "In an up-trending market this inherits most of the market drift, so its Sharpe "
+                "is close to buy-and-hold — NOT a zero-alpha no-skill bar. It tests whether the "
+                "agent beats random entry/exit while long, not whether it beats a market-neutral "
+                "coin-flip. A long/short sign-flip baseline would sit near zero."
+            ),
+        }
     except Exception:
         return {}
 
@@ -535,9 +544,12 @@ def run_backtest(
     sanity = _rl_sanity_checks(trades, account_values, dates)
 
     # ── Overfitting report ───────────────────────────────────────────────────
+    # Tag the engine so the report evaluates val/train with the SAME engine.
+    metrics["_data_source"] = data_source
     overfitting_report = _build_overfitting_report(
         run, metrics, test_start, test_end, initial_capital, commission_pct, slippage_pct
     )
+    metrics.pop("_data_source", None)   # internal flag, not for output
 
     # ── Distribution stats + bootstrap CI ───────────────────────────────────
     # Done after baselines so these heavier stats don't slow sub-period loops
@@ -562,6 +574,14 @@ def run_backtest(
         "total_round_trip_pct": round((commission_pct + slippage_pct) * 2 * 100, 3),
         "max_position_pct":    max_position_pct,
         "cooldown_days":       cooldown_days,
+        "cooldown_note": (
+            f"cooldown_days={cooldown_days} and max_position_pct constrain the SYNTHETIC "
+            "baseline engine and shape the RL training reward (turnover penalty). They are "
+            "NOT applied as a post-hoc filter to a trained RL agent's executed actions — the "
+            "agent may rebalance the same ticker on consecutive days. Per-trade rows reflect "
+            "the agent's raw allocation changes, so consecutive same-ticker trades are expected "
+            "and do not violate a hard cooldown (there is none on the live policy)."
+        ),
         "note": (
             f"Base friction: +{commission_pct*100:.2f}% commission per leg. "
             f"Slippage: Almgren-Chriss sqrt model — base {slippage_pct*100:.2f}% "
@@ -1346,6 +1366,64 @@ def _rl_sanity_checks(
     }
 
 
+def _real_model_account_values(
+    run, test_start: str, test_end: str,
+    initial_capital: float, commission_pct: float, slippage_pct: float,
+) -> Optional[List[float]]:
+    """
+    Run the trained model on [test_start, test_end] and return account values.
+    Lean version of run_backtest's real-model block (no step log / trades), used
+    by the overfitting report so train/val/test all use the SAME real model.
+    Returns None on any failure (caller falls back to the synthetic engine).
+    """
+    model_path = run.model_path
+    if not (FINRL_AVAILABLE and model_path and Path(str(model_path) + ".zip").exists()):
+        return None
+    try:
+        from finrl.meta.preprocessor.preprocessors import data_split
+        from finrl.meta.env_stock_trading.env_stocktrading import StockTradingEnv
+
+        is_step4 = (run.data_job_id or "").startswith("step4")
+        if is_step4:
+            from app.services.feature_service import FEATURE_COLUMNS
+            tech = list(FEATURE_COLUMNS)
+            ff = Path(settings.oof_dir) / "features_us.csv"
+            if not ff.exists():
+                return None
+            df = pd.read_csv(ff)
+            test_df = data_split(df, test_start, test_end)
+            if test_df.empty:
+                return None
+            for ind in tech:
+                if ind not in test_df.columns:
+                    test_df[ind] = 0.0
+        else:
+            from app.services.rl_features import build_alpha_state_pipeline
+            df = pd.read_csv(Path(settings.data_dir) / run.data_job_id / "data.csv")
+            test_df = data_split(df, test_start, test_end)
+            tech = finrl_wrapper.get_indicators(include_rl_extras=True)
+            test_df, _ = overlay_yahoo_closes(test_df, test_start, test_end, tech)
+            ai = (run.metrics_json or {}).get("alpha_inputs") or {}
+            test_df = build_alpha_state_pipeline(test_df, ai.get("xgb_run_id"),
+                                                 ai.get("lstm_run_id"), run.data_job_id)
+            for ind in tech:
+                if ind not in test_df.columns:
+                    test_df[ind] = 0.0
+
+        tickers     = sorted(test_df["tic"].unique().tolist())
+        stock_dim   = len(tickers)
+        state_space = 1 + 2 * stock_dim + len(tech) * stock_dim
+        env_kwargs  = finrl_env_kwargs(stock_dim, state_space, tech, initial_capital)
+        env_kwargs["buy_cost_pct"]  = [commission_pct + slippage_pct] * stock_dim
+        env_kwargs["sell_cost_pct"] = [commission_pct + slippage_pct] * stock_dim
+        e = StockTradingEnv(df=test_df, **env_kwargs)
+        dav, _ = _finrl_predict(run.algorithm, model_path, e)
+        return dav["account_value"].tolist()
+    except Exception as exc:
+        logger.debug("real-model window eval failed (%s–%s): %s", test_start, test_end, exc)
+        return None
+
+
 # ── Overfitting report ────────────────────────────────────────────────────────
 
 def _build_overfitting_report(
@@ -1362,49 +1440,49 @@ def _build_overfitting_report(
     - Training period : from run.metrics_json["train_window"] if available
     - Validation period: auto-inferred as 6 months before test_start
     - Test period      : current backtest result (already computed)
-    All periods use the same synthetic engine for apples-to-apples comparison.
+
+    All periods are evaluated with the SAME engine as the test result: if the
+    test used the real model, validation/train also use the real model (so the
+    comparison is valid). Previously train/val used a synthetic engine while
+    test used the real model — an apples-to-oranges comparison that produced
+    nonsensical divergence (e.g. val -8% vs test +79%).
     """
     train_window: Dict = {}
     if run.metrics_json:
         train_window = run.metrics_json.get("train_window", {})
 
-    # ── Validation period ─────────────────────────────────────────────────────
-    val_metrics:  Dict = {}
-    val_start_str = val_end_str = "—"
-    try:
-        val_end_ts    = pd.Timestamp(test_start) - pd.Timedelta(days=1)
-        val_start_ts  = val_end_ts - pd.DateOffset(months=6)
-        val_start_str = val_start_ts.strftime("%Y-%m-%d")
-        val_end_str   = val_end_ts.strftime("%Y-%m-%d")
-        v_vals, v_trades, _ = _generate_synthetic_portfolio(
-            run_id=run.id,
-            test_start=val_start_str, test_end=val_end_str,
-            initial_capital=initial_capital,
-            commission_pct=commission_pct, slippage_pct=slippage_pct,
-            max_position_pct=0.20, cooldown_days=5,
-        )
-        v_ret      = _compute_daily_returns(v_vals)
-        val_metrics = _compute_metrics(v_vals, v_ret, initial_capital, v_trades)
-    except Exception:
-        pass
+    test_is_real = (test_metrics.get("_data_source") == "finrl_model")
+
+    def _eval_window(start: str, end: str, seed_suffix: str) -> Dict:
+        # Prefer the real model when the test result is real, so all periods
+        # are comparable. Fall back to the synthetic engine otherwise.
+        if test_is_real:
+            vals = _real_model_account_values(run, start, end, initial_capital,
+                                              commission_pct, slippage_pct)
+            if vals and len(vals) > 5:
+                return _compute_metrics(vals, _compute_daily_returns(vals), initial_capital, [])
+        try:
+            vv, vt, _ = _generate_synthetic_portfolio(
+                run_id=run.id + seed_suffix, test_start=start, test_end=end,
+                initial_capital=initial_capital, commission_pct=commission_pct,
+                slippage_pct=slippage_pct, max_position_pct=0.20, cooldown_days=5)
+            return _compute_metrics(vv, _compute_daily_returns(vv), initial_capital, vt)
+        except Exception:
+            return {}
+
+    # ── Validation period (6 months before test) ──────────────────────────────
+    val_end_ts    = pd.Timestamp(test_start) - pd.Timedelta(days=1)
+    val_start_ts  = val_end_ts - pd.DateOffset(months=6)
+    val_start_str = val_start_ts.strftime("%Y-%m-%d")
+    val_end_str   = val_end_ts.strftime("%Y-%m-%d")
+    val_metrics   = _eval_window(val_start_str, val_end_str, "_val")
 
     # ── Training period ───────────────────────────────────────────────────────
     train_metrics:  Dict = {}
     train_start_str = train_window.get("start", "")
     train_end_str   = train_window.get("end",   "")
     if train_start_str and train_end_str:
-        try:
-            t_vals, t_trades, _ = _generate_synthetic_portfolio(
-                run_id=run.id + "_tr",
-                test_start=train_start_str, test_end=train_end_str,
-                initial_capital=initial_capital,
-                commission_pct=commission_pct, slippage_pct=slippage_pct,
-                max_position_pct=0.20, cooldown_days=5,
-            )
-            t_ret        = _compute_daily_returns(t_vals)
-            train_metrics = _compute_metrics(t_vals, t_ret, initial_capital, t_trades)
-        except Exception:
-            pass
+        train_metrics = _eval_window(train_start_str, train_end_str, "_tr")
 
     # ── Degradation gaps ──────────────────────────────────────────────────────
     tr  = train_metrics.get("total_return")
@@ -1417,13 +1495,18 @@ def _build_overfitting_report(
 
     primary_gap = gaps.get("val_to_test", gaps.get("train_to_test", 0.0))
     if primary_gap > 0.20:
-        verdict = "⚠ Likely overfitting — large performance drop from validation to test"
+        verdict = ("Large positive train/validation-to-test gap (>20pp): strong evidence "
+                   "of overfitting or regime-specific fit; treat test results with caution.")
     elif primary_gap > 0.10:
-        verdict = "~ Moderate degradation — typical for RL agents on unseen regimes"
+        verdict = ("Moderate degradation (10–20pp) from validation to test — consistent with "
+                   "RL agents encountering unseen market regimes.")
     elif primary_gap > -0.02:
-        verdict = "✓ Mild / no degradation — reasonable out-of-sample generalization"
+        verdict = ("Minimal degradation (≤10pp): performance is broadly stable across the "
+                   "validation and test periods.")
     else:
-        verdict = "✓ Improving out-of-sample — strategy may be genuinely adaptive"
+        verdict = ("Test outperforms validation: performance divergence indicates sensitivity "
+                   "to differing market-regime conditions across the two windows, not a "
+                   "monotonic generalization signal — interpret with regime context.")
 
     return {
         "train": {
@@ -1770,10 +1853,14 @@ def _compute_metrics(
     sharpe = float(returns.mean() / returns.std() * np.sqrt(252)) \
              if returns.std() > 1e-10 else 0.0
 
-    # Sortino (downside deviation only)
-    neg      = returns[returns < 0]
-    down_std = float(np.std(neg) * np.sqrt(252)) if len(neg) > 1 else 1e-9
-    sortino  = float(returns.mean() * np.sqrt(252) / down_std)
+    # Sortino (downside deviation only) — annualized the SAME way as Sharpe
+    # (×√252 on the daily mean/downside-std ratio). Previous code pre-annualized
+    # the denominator AND multiplied the numerator by √252, cancelling the
+    # annualization → Sortino came out ~Sharpe/√252 (e.g. 0.18 vs 1.88). Bug.
+    neg          = returns[returns < 0]
+    down_std_day = float(np.std(neg)) if len(neg) > 1 else 1e-9   # DAILY downside dev
+    sortino      = float(returns.mean() / (down_std_day + 1e-12) * np.sqrt(252)) \
+                   if down_std_day > 1e-10 else 0.0
 
     # Max drawdown
     peak, max_dd = account_values[0], 0.0
@@ -1827,8 +1914,14 @@ def _compute_metrics(
         if trade_rets:
             m["avg_trade_return"] = round(float(np.mean(trade_rets)), 4)
 
+        # "active_days_pct" = fraction of days on which a trade occurred (trade
+        # FREQUENCY), NOT capital deployed. Previously mislabeled "exposure_pct",
+        # which readers misread as "mostly in cash". Keep exposure_pct as an alias
+        # for backward compat but make the meaning explicit.
         trade_dates = set(t.get("date", "") for t in trades)
-        m["exposure_pct"] = round(float(min(len(trade_dates) / n_days, 1.0)), 4) if n_days > 0 else 0.0
+        active = round(float(min(len(trade_dates) / n_days, 1.0)), 4) if n_days > 0 else 0.0
+        m["active_days_pct"] = active
+        m["exposure_pct"]    = active   # legacy alias (trade-day frequency)
 
         # Use effective_price for notional volume so turnover reflects actual cash flow
         total_traded = sum(
