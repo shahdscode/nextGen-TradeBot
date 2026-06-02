@@ -405,6 +405,92 @@ def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
     }
 
 
+@router.get("/alpaca/status")
+def alpaca_status():
+    """Alpaca paper account status + market clock."""
+    from app.services import alpaca_service
+    if not alpaca_service.configured():
+        return {"configured": False,
+                "message": "Set ALPACA_API_KEY / ALPACA_API_SECRET in .env"}
+    try:
+        acct = alpaca_service.get_account()
+        return {"configured": True, "broker": "alpaca_paper",
+                "market_open": alpaca_service.market_is_open(), **acct}
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Alpaca error: {e}")
+
+
+@router.get("/alpaca/portfolio")
+def alpaca_portfolio():
+    """Live positions + P&L from the Alpaca paper account."""
+    from app.services import alpaca_service
+    if not alpaca_service.configured():
+        return {"configured": False, "positions": [],
+                "message": "Set ALPACA_API_KEY / ALPACA_API_SECRET in .env"}
+    try:
+        return alpaca_service.portfolio_snapshot()
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Alpaca error: {e}")
+
+
+@router.post("/alpaca/rebalance")
+def alpaca_rebalance(run_id: str | None = None, mode: str = "rl"):
+    """
+    Run the model on live DOW30 data and rebalance the ALPACA paper account to
+    the model's target weights (real broker orders). mode='rl' (single model,
+    pass run_id) or mode='meta' (full 7-model ensemble).
+    """
+    from app.services import alpaca_service
+    from app.services.live_trading_service import (
+        generate_live_allocation, generate_meta_allocation)
+
+    if not alpaca_service.configured():
+        raise HTTPException(status_code=400,
+                            detail="Alpaca not configured — set keys in .env")
+
+    s = _get_session()
+    equity = None
+    try:
+        equity = alpaca_service.get_account()["equity"]
+    except Exception:
+        pass
+    budget = equity or float(s.get("initial_cash") or 100_000.0)
+
+    if mode == "meta":
+        alloc = generate_meta_allocation(budget)
+        rid = "meta_learner"
+    else:
+        rid = run_id or s.get("run_id")
+        if not rid:
+            raise HTTPException(status_code=400, detail="run_id required for mode=rl")
+        alloc = generate_live_allocation(rid, budget)
+    if not alloc.get("ok"):
+        raise HTTPException(status_code=400, detail=alloc.get("message", "allocation failed"))
+
+    # Convert model target (shares × price) → portfolio weights
+    target_val = {t: alloc["target"].get(t, 0.0) * alloc["prices"].get(t, 0.0)
+                  for t in alloc["tickers"]}
+    total = sum(v for v in target_val.values() if v > 0)
+    weights = {t: (v / total) for t, v in target_val.items() if v > 0} if total > 0 else {}
+
+    result = alpaca_service.rebalance_to_weights(weights)
+
+    # Persist session intent
+    global _SESSION_CACHE
+    s.update({"run_id": rid, "symbols": alloc["tickers"], "timeframe": "1d",
+              "running": True, "initial_cash": float(s.get("initial_cash") or 100_000.0)})
+    s.setdefault("session_id", str(uuid.uuid4()))
+    _SESSION_CACHE = s
+    _save_session(s)
+
+    return {
+        "ok": True, "broker": "alpaca_paper", "mode": mode, "run_id": rid,
+        "as_of": alloc.get("as_of"), "model_message": alloc.get("message"),
+        "weights": {t: round(w, 4) for t, w in weights.items()},
+        **result,
+    }
+
+
 @router.get("/history")
 def get_session_history(limit: int = 20):
     """Return past paper trading sessions (most recent first)."""

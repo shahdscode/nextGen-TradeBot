@@ -45,7 +45,9 @@ class Settings(BaseSettings):
     slippage_bps: float = 5.0
 
     class Config:
-        env_file = ".env"
+        # Absolute path to the project-root .env so the API/workers/scripts all
+        # read the same file regardless of working directory (backend/ vs root).
+        env_file = str(_PROJECT_ROOT / ".env")
 
 
 settings = Settings()
