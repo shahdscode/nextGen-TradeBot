@@ -123,6 +123,162 @@ def _make_env(featured: pd.DataFrame, initial_cash: float):
     return env, tics, stock_dim
 
 
+def _latest_featured() -> tuple:
+    """Download live DOW30 data and build the feature matrix. Returns (featured, latest_date)."""
+    end = datetime.utcnow().date()
+    start = end - timedelta(days=_LOOKBACK_DAYS)
+    raw = _download_live(LIVE_TICKERS, str(start), str(end))
+    vix = download_vix(str(start), str(end))
+    featured = _build_featured(raw, vix)
+    latest_date = pd.to_datetime(featured["date"]).max()
+    return featured, latest_date
+
+
+def _rl_holdings(featured: pd.DataFrame, algo: str, model_path: str,
+                 initial_cash: float) -> Dict[str, float]:
+    """Run one RL model through the live window; return {ticker: final holding qty}."""
+    from stable_baselines3 import PPO, A2C, DDPG, TD3, SAC
+    cls = {"ppo": PPO, "a2c": A2C, "ddpg": DDPG, "td3": TD3, "sac": SAC}[algo]
+    env, tics, stock_dim = _make_env(featured, initial_cash)
+    model = cls.load(model_path)
+    reset_out = env.reset()
+    obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
+    done = False
+    while not done:
+        action, _ = model.predict(obs, deterministic=True)
+        step = env.step(action)
+        if len(step) == 5:
+            obs, _, term, trunc, _ = step; done = term or trunc
+        else:
+            obs, _, done, _ = step
+    state = np.asarray(env.state, dtype=float)
+    holdings = state[1 + stock_dim: 1 + 2 * stock_dim]
+    return {t: float(holdings[i]) for i, t in enumerate(tics)}
+
+
+def generate_meta_allocation(initial_cash: float = 100_000.0) -> Dict[str, Any]:
+    """
+    Full 7-model meta-learner allocation on live DOW30 data.
+
+    Assembles xgb + lstm + 5 RL signals + regime + VIX per stock, runs the
+    trained meta-learner per stock → probability, and allocates capital
+    proportional to the meta probability among BUY stocks (prob > 0.5).
+    Requires deployable base models (scripts/train_deployable_models.py) and
+    meta_learner.pkl (Step 5).
+    """
+    import pickle
+    from app.services.meta_learner_service import predict_meta_learner
+
+    deploy = Path(settings.models_dir) / "deploy"
+    meta_path = str(Path(settings.models_dir) / "meta_learner.pkl")
+    if not (deploy / "xgb_deploy.pkl").exists() or not (deploy / "lstm_deploy.pt").exists():
+        return {"ok": False, "message": "Deployable base models missing — run scripts/train_deployable_models.py"}
+    if not Path(meta_path).exists():
+        return {"ok": False, "message": "meta_learner.pkl missing — run Step 5"}
+    if not finrl_wrapper.FINRL_AVAILABLE:
+        return {"ok": False, "message": "FinRL not available"}
+
+    try:
+        featured, latest_date = _latest_featured()
+        latest = featured[pd.to_datetime(featured["date"]) == latest_date].copy()
+        tics = sorted(latest["tic"].unique())
+
+        # ── XGBoost (pooled deployable) ───────────────────────────────────────
+        with open(deploy / "xgb_deploy.pkl", "rb") as f:
+            xgb_bundle = pickle.load(f)
+        xgb_model, xgb_feats = xgb_bundle["model"], xgb_bundle["features"]
+        xgb_sig = {}
+        for _, r in latest.iterrows():
+            x = r[xgb_feats].values.astype(np.float32).reshape(1, -1)
+            xgb_sig[r["tic"]] = float(xgb_model.predict_proba(x)[0][1])
+
+        # ── LSTM (pooled deployable, last-20 sequence per ticker) ────────────
+        import torch, torch.nn as nn
+        ck = torch.load(deploy / "lstm_deploy.pt"); seq_len = ck["seq_len"]; lf = ck["features"]
+        with open(deploy / "lstm_scaler.pkl", "rb") as f:
+            lstm_scaler = pickle.load(f)
+        class LSTMClf(nn.Module):
+            def __init__(self, n):
+                super().__init__()
+                self.lstm = nn.LSTM(n, 64, num_layers=2, batch_first=True, dropout=0.3)
+                self.fc = nn.Linear(64, 1); self.sig = nn.Sigmoid()
+            def forward(self, x):
+                o, _ = self.lstm(x); return self.sig(self.fc(o[:, -1, :]))
+        lstm_model = LSTMClf(ck["n_features"]); lstm_model.load_state_dict(ck["state_dict"]); lstm_model.eval()
+        lstm_sig = {}
+        for tic in tics:
+            g = featured[featured["tic"] == tic].sort_values("date")
+            if len(g) < seq_len:
+                lstm_sig[tic] = 0.5; continue
+            seq = lstm_scaler.transform(g[lf].values.astype(np.float32))[-seq_len:]
+            with torch.no_grad():
+                lstm_sig[tic] = float(lstm_model(torch.tensor(seq).unsqueeze(0)).item())
+
+        # ── 5 RL models (ckpt3) → per-stock signal from holdings ─────────────
+        db = SessionLocal()
+        rl_runs = {}
+        for a in ["ppo", "a2c", "ddpg", "td3", "sac"]:
+            r = (db.query(Run).filter(Run.algorithm == a, Run.data_job_id == "step4_ckpt3").first()
+                 or db.query(Run).filter(Run.algorithm == a).first())
+            if r:
+                rl_runs[a] = r.model_path
+        db.close()
+        rl_sig = {a: {} for a in ["ppo", "a2c", "ddpg", "td3", "sac"]}
+        for a, mp in rl_runs.items():
+            if mp and Path(str(mp) + ".zip").exists():
+                holds = _rl_holdings(featured, a, mp, initial_cash)
+                mx = max(holds.values()) if holds else 0
+                for t in tics:
+                    rl_sig[a][t] = 0.5 + 0.5 * (holds.get(t, 0) / mx) if mx > 0 else 0.5
+
+        # ── Regime + VIX ─────────────────────────────────────────────────────
+        mkt_mom = featured.groupby("date")["price_mom_20"].mean()
+        thr = mkt_mom.std() * 0.5
+        today_mom = mkt_mom.loc[mkt_mom.index.max()] if len(mkt_mom) else 0.0
+        regime_bull = int(today_mom > thr); regime_bear = int(today_mom < -thr)
+        vix_by_tic = dict(zip(latest["tic"], latest["vix_zscore"]))
+
+        # ── Meta-learner per stock ───────────────────────────────────────────
+        meta_prob = {}
+        for t in tics:
+            fdict = {
+                "xgb_signal": xgb_sig.get(t, 0.5), "lstm_signal": lstm_sig.get(t, 0.5),
+                "ppo_signal": rl_sig["ppo"].get(t, 0.5), "a2c_signal": rl_sig["a2c"].get(t, 0.5),
+                "ddpg_signal": rl_sig["ddpg"].get(t, 0.5), "td3_signal": rl_sig["td3"].get(t, 0.5),
+                "sac_signal": rl_sig["sac"].get(t, 0.5),
+                "regime_bull": regime_bull, "regime_bear": regime_bear,
+                "sentiment_score": 0.0, "vix_zscore": float(vix_by_tic.get(t, 0.0)),
+            }
+            meta_prob[t] = float(predict_meta_learner(meta_path, fdict)["probability"])
+
+        # ── Allocate ∝ meta probability among BUY stocks (prob > 0.5) ────────
+        latest_close = dict(zip(latest["tic"], latest["close"].astype(float)))
+        buys = {t: p for t, p in meta_prob.items() if p > 0.5}
+        wsum = sum(buys.values())
+        target, prices, signals = {}, {}, {}
+        for t in tics:
+            px = latest_close.get(t, 0.0)
+            prices[t] = round(px, 4)
+            if t in buys and wsum > 0 and px > 0:
+                dollars = initial_cash * (buys[t] / wsum)
+                target[t] = round(dollars / px, 4)
+                signals[t] = "BUY"
+            else:
+                target[t] = 0.0
+                signals[t] = "SELL" if meta_prob[t] < 0.45 else "HOLD"
+
+        return {
+            "ok": True, "as_of": str(latest_date.date()), "tickers": tics,
+            "target": target, "prices": prices, "signals": signals,
+            "meta_prob": {t: round(p, 4) for t, p in meta_prob.items()},
+            "algorithm": "meta_learner",
+            "message": f"Meta-learner holds {len(buys)}/{len(tics)} stocks as of {latest_date.date()}",
+        }
+    except Exception as exc:
+        logger.exception("generate_meta_allocation failed")
+        return {"ok": False, "message": f"Meta allocation error: {exc}"}
+
+
 def generate_live_allocation(run_id: str, initial_cash: float = 100_000.0) -> Dict[str, Any]:
     """
     Run the trained RL model on live DOW30 data and return the target portfolio.

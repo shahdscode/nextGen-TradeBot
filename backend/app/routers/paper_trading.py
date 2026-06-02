@@ -335,26 +335,35 @@ def get_portfolio():
 
 
 @router.post("/rebalance")
-def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0):
+def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
+              mode: str = "rl"):
     """
     Model-driven trade decision on LIVE DOW30 data.
 
-    Runs the trained RL model on live Yahoo daily bars, reads the portfolio the
-    model would hold right now, and rebalances the paper account to match.
-    Does NOT require MT5 (US equities use the Yahoo feed). This is what makes
-    paper trading actually use the model instead of equal-weight buy-and-hold.
+    mode="rl"   : run one trained RL model (pass run_id), use its live holdings.
+    mode="meta" : full 7-model meta-learner ensemble (run_id ignored) — assembles
+                  xgb + lstm + 5 RL signals + regime + VIX per stock, runs the
+                  meta-learner, allocates ∝ meta probability among BUY stocks.
+
+    Rebalances the paper account to the model's target. No MT5 required
+    (US equities use the Yahoo feed).
     """
-    from app.services.live_trading_service import generate_live_allocation
+    from app.services.live_trading_service import generate_live_allocation, generate_meta_allocation
 
     global _SESSION_CACHE
     s = _get_session()
-    rid = run_id or s.get("run_id")
-    if not rid:
-        raise HTTPException(status_code=400,
-                            detail="run_id required (pass run_id or start a session first)")
-
     cash = float(s.get("initial_cash") or initial_cash)
-    alloc = generate_live_allocation(rid, cash)
+
+    if mode == "meta":
+        rid = "meta_learner"
+        alloc = generate_meta_allocation(cash)
+    else:
+        rid = run_id or s.get("run_id")
+        if not rid:
+            raise HTTPException(status_code=400,
+                                detail="run_id required (pass run_id or start a session first)")
+        alloc = generate_live_allocation(rid, cash)
+
     if not alloc.get("ok"):
         raise HTTPException(status_code=400, detail=alloc.get("message", "allocation failed"))
 
