@@ -119,16 +119,22 @@ def _submit_notional(symbol: str, notional: float, side: str) -> Optional[dict]:
 
 
 def rebalance_to_weights(target_weights: Dict[str, float],
-                         min_trade_dollars: float = 50.0) -> Dict[str, Any]:
+                         min_trade_dollars: float = 50.0,
+                         cash_buffer_pct: float = 0.02) -> Dict[str, Any]:
     """
     Rebalance the Alpaca paper account toward target weights (sum ≤ 1 of equity).
+
+    A cash_buffer_pct (default 2%) is held back so notional orders + price drift
+    between calculation and fill can't push the account into negative cash /
+    margin. Targets are scaled to (1 - buffer) of equity.
 
     Computes per-symbol dollar deltas vs current positions and submits market
     orders (notional). Symbols not in target_weights are flattened (sold).
     Returns the submitted orders + resulting account snapshot.
     """
     acct   = get_account()
-    equity = acct["equity"]
+    # Deploy only (1 - buffer) of equity so we never overdraw cash on fills.
+    equity = acct["equity"] * (1.0 - max(0.0, min(cash_buffer_pct, 0.5)))
     positions = {p["symbol"]: p for p in get_positions()}
 
     # Current $ per symbol
