@@ -31,6 +31,7 @@ export default function PortfolioScreen() {
   const [loading, setLoading] = useState(true)
   const [refreshing, setRefreshing] = useState(false)
   const [err, setErr] = useState(null)
+  const [updatedAt, setUpdatedAt] = useState(null)
 
   const load = useCallback(() => {
     return Promise.all([
@@ -38,6 +39,7 @@ export default function PortfolioScreen() {
       client.get('/api/paper-trading/alpaca/status').catch(() => null),
     ]).then(([p, s]) => {
       setPf(p.data); setStatus(s?.data); setErr(null)
+      setUpdatedAt(new Date())
     }).catch(e => setErr(e.response?.data?.detail || 'Could not load Alpaca portfolio'))
   }, [])
 
@@ -135,6 +137,9 @@ export default function PortfolioScreen() {
             ))
           )}
           <Text style={styles.footer}>{pf?.message}</Text>
+          {updatedAt && (
+            <Text style={styles.footer}>Updated {updatedAt.toLocaleTimeString()} · pull to refresh</Text>
+          )}
         </ScrollView>
       )}
     </View>
