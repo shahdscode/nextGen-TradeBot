@@ -83,11 +83,36 @@ def get_positions() -> List[Dict[str, Any]]:
     return out
 
 
+def get_portfolio_history(period: str = "all", timeframe: str = "1D") -> Dict[str, Any]:
+    """
+    Account equity curve since inception (Alpaca tracks it natively).
+    Returns {timestamps[], equity[], base_value, total_return, total_pl}.
+    """
+    try:
+        h = _get("/account/portfolio/history", period=period, timeframe=timeframe)
+        eq = [float(x) for x in (h.get("equity") or []) if x is not None]
+        base = float(h.get("base_value") or (eq[0] if eq else 0.0))
+        last = eq[-1] if eq else base
+        total_ret = (last / base - 1.0) if base > 0 else 0.0
+        return {
+            "timestamps":   h.get("timestamp", []),
+            "equity":       eq,
+            "base_value":   round(base, 2),
+            "total_return": round(total_ret, 6),
+            "total_pl":     round(last - base, 2),
+        }
+    except Exception as exc:
+        logger.warning("portfolio history failed: %s", exc)
+        return {"timestamps": [], "equity": [], "base_value": 0.0,
+                "total_return": 0.0, "total_pl": 0.0}
+
+
 def portfolio_snapshot() -> Dict[str, Any]:
     acct = get_account()
     pos  = get_positions()
     daily = ((acct["equity"] / acct["last_equity"] - 1.0)
              if acct["last_equity"] > 0 else 0.0)
+    hist = get_portfolio_history()
     return {
         "configured":      True,
         "broker":          "alpaca_paper",
@@ -95,6 +120,10 @@ def portfolio_snapshot() -> Dict[str, Any]:
         "cash":            round(acct["cash"], 2),
         "buying_power":    round(acct["buying_power"], 2),
         "daily_return":    round(daily, 6),
+        "total_return":    hist["total_return"],          # since inception
+        "total_pl":        hist["total_pl"],
+        "starting_value":  hist["base_value"],
+        "equity_curve":    hist["equity"][-90:],          # last 90 points for a sparkline
         "market_open":     market_is_open(),
         "positions":       pos,
         "message":         "Live Alpaca paper account (real fills, US equities).",

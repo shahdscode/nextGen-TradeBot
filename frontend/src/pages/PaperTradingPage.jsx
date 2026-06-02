@@ -180,15 +180,38 @@ export default function PaperTradingPage() {
           The model picks the allocation; Alpaca executes and tracks positions + P&L.
         </p>
         {alpaca?.configured && (
-          <div className="grid grid-cols-3 gap-3 mb-4">
-            {[['Equity', alpaca.equity], ['Cash', alpaca.cash], ['Buying Power', alpaca.buying_power]].map(([l, v]) => (
-              <div key={l} className="bg-gray-50 rounded-lg p-3">
-                <div className="text-xs text-gray-500">{l}</div>
-                <div className="text-lg font-bold text-gray-900">
-                  ${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+            <div className="bg-gray-50 rounded-lg p-3">
+              <div className="text-xs text-gray-500">Equity</div>
+              <div className="text-lg font-bold text-gray-900">
+                ${Number(alpaca.equity).toLocaleString(undefined, { maximumFractionDigits: 0 })}
               </div>
-            ))}
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3">
+              <div className="text-xs text-gray-500">Total Return</div>
+              <div className={`text-lg font-bold ${(alpacaPf?.total_return ?? 0) >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                {alpacaPf?.total_return != null
+                  ? `${alpacaPf.total_return >= 0 ? '+' : ''}${(alpacaPf.total_return * 100).toFixed(2)}%`
+                  : '—'}
+              </div>
+              <div className="text-[10px] text-gray-400">
+                {alpacaPf?.total_pl != null
+                  ? `${alpacaPf.total_pl >= 0 ? '+' : ''}$${alpacaPf.total_pl.toLocaleString(undefined,{maximumFractionDigits:0})} since start`
+                  : ''}
+              </div>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3">
+              <div className="text-xs text-gray-500">Cash</div>
+              <div className="text-lg font-bold text-gray-900">
+                ${Number(alpaca.cash).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              </div>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3">
+              <div className="text-xs text-gray-500">Buying Power</div>
+              <div className="text-lg font-bold text-gray-900">
+                ${Number(alpaca.buying_power).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              </div>
+            </div>
           </div>
         )}
         <div className="flex items-center gap-2 mb-3">
