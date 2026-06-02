@@ -1,0 +1,183 @@
+"""
+Alpaca paper-trading broker integration.
+
+Unlike the Yahoo-simulated rebalance (which tracks a portfolio internally),
+this submits REAL orders to an Alpaca paper account and reads back actual
+positions + P&L. Alpaca trades US equities (DOW30) — the exact assets the
+models were trained on — so it's a true broker-grade paper-trading venue.
+
+Free: Alpaca paper accounts cost nothing. Keys live in .env
+(ALPACA_API_KEY / ALPACA_API_SECRET / ALPACA_BASE_URL).
+"""
+from __future__ import annotations
+
+import logging
+from typing import Any, Dict, List, Optional
+
+import requests
+
+from app.config import settings
+
+logger = logging.getLogger(__name__)
+
+_BASE = (settings.alpaca_base_url or "https://paper-api.alpaca.markets").rstrip("/")
+
+
+def configured() -> bool:
+    return bool(settings.alpaca_api_key and settings.alpaca_api_secret)
+
+
+def _headers() -> Dict[str, str]:
+    return {
+        "APCA-API-KEY-ID":     settings.alpaca_api_key,
+        "APCA-API-SECRET-KEY": settings.alpaca_api_secret,
+    }
+
+
+def _get(path: str, **params):
+    r = requests.get(f"{_BASE}/v2{path}", headers=_headers(), params=params or None, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
+def _post(path: str, payload: dict):
+    r = requests.post(f"{_BASE}/v2{path}", headers=_headers(), json=payload, timeout=15)
+    if r.status_code >= 400:
+        raise RuntimeError(f"Alpaca {path} → {r.status_code}: {r.text[:200]}")
+    return r.json()
+
+
+# ── Account / market state ─────────────────────────────────────────────────────
+
+def get_account() -> Dict[str, Any]:
+    a = _get("/account")
+    return {
+        "status":          a.get("status"),
+        "equity":          float(a.get("equity", 0)),
+        "cash":            float(a.get("cash", 0)),
+        "buying_power":    float(a.get("buying_power", 0)),
+        "portfolio_value": float(a.get("portfolio_value", 0)),
+        "last_equity":     float(a.get("last_equity", 0)),
+    }
+
+
+def market_is_open() -> bool:
+    try:
+        return bool(_get("/clock").get("is_open", False))
+    except Exception:
+        return False
+
+
+def get_positions() -> List[Dict[str, Any]]:
+    out = []
+    for p in _get("/positions"):
+        out.append({
+            "symbol":          p["symbol"],
+            "qty":             float(p["qty"]),
+            "entry_price":     float(p["avg_entry_price"]),
+            "current_price":   float(p["current_price"]),
+            "market_value":    float(p["market_value"]),
+            "unrealized_pl":   float(p["unrealized_pl"]),
+            "unrealized_plpc": float(p["unrealized_plpc"]),
+        })
+    return out
+
+
+def portfolio_snapshot() -> Dict[str, Any]:
+    acct = get_account()
+    pos  = get_positions()
+    daily = ((acct["equity"] / acct["last_equity"] - 1.0)
+             if acct["last_equity"] > 0 else 0.0)
+    return {
+        "configured":      True,
+        "broker":          "alpaca_paper",
+        "portfolio_value": round(acct["equity"], 2),
+        "cash":            round(acct["cash"], 2),
+        "buying_power":    round(acct["buying_power"], 2),
+        "daily_return":    round(daily, 6),
+        "market_open":     market_is_open(),
+        "positions":       pos,
+        "message":         "Live Alpaca paper account (real fills, US equities).",
+    }
+
+
+# ── Order submission ───────────────────────────────────────────────────────────
+
+def _submit_notional(symbol: str, notional: float, side: str) -> Optional[dict]:
+    """Submit a market order for a dollar amount (fractional shares)."""
+    try:
+        return _post("/orders", {
+            "symbol":        symbol,
+            "notional":      round(abs(notional), 2),
+            "side":          side,
+            "type":          "market",
+            "time_in_force": "day",
+        })
+    except Exception as exc:
+        logger.warning("Alpaca order %s %s $%.2f failed: %s", side, symbol, notional, exc)
+        return None
+
+
+def rebalance_to_weights(target_weights: Dict[str, float],
+                         min_trade_dollars: float = 50.0,
+                         cash_buffer_pct: float = 0.02) -> Dict[str, Any]:
+    """
+    Rebalance the Alpaca paper account toward target weights (sum ≤ 1 of equity).
+
+    A cash_buffer_pct (default 2%) is held back so notional orders + price drift
+    between calculation and fill can't push the account into negative cash /
+    margin. Targets are scaled to (1 - buffer) of equity.
+
+    Computes per-symbol dollar deltas vs current positions and submits market
+    orders (notional). Symbols not in target_weights are flattened (sold).
+    Returns the submitted orders + resulting account snapshot.
+    """
+    acct   = get_account()
+    # Deploy only (1 - buffer) of equity so we never overdraw cash on fills.
+    equity = acct["equity"] * (1.0 - max(0.0, min(cash_buffer_pct, 0.5)))
+    positions = {p["symbol"]: p for p in get_positions()}
+
+    # Current $ per symbol
+    cur_val = {s: p["market_value"] for s, p in positions.items()}
+    symbols = set(target_weights) | set(cur_val)
+
+    orders, skipped = [], []
+    is_open = market_is_open()
+
+    # Sells first (free up buying power), then buys
+    deltas = {}
+    for s in symbols:
+        tgt = equity * float(target_weights.get(s, 0.0))
+        cur = cur_val.get(s, 0.0)
+        deltas[s] = tgt - cur
+
+    for s in sorted(symbols, key=lambda x: deltas[x]):   # sells (neg) first
+        d = deltas[s]
+        if abs(d) < min_trade_dollars:
+            continue
+        side = "buy" if d > 0 else "sell"
+        # When fully exiting, close the position to avoid leftover fractional dust
+        if side == "sell" and target_weights.get(s, 0.0) == 0.0 and s in positions:
+            try:
+                requests.delete(f"{_BASE}/v2/positions/{s}", headers=_headers(), timeout=15)
+                orders.append({"symbol": s, "side": "sell", "action": "close_position"})
+                continue
+            except Exception:
+                pass
+        o = _submit_notional(s, d, side)
+        if o:
+            orders.append({"symbol": s, "side": side, "notional": round(abs(d), 2),
+                           "order_id": o.get("id"), "status": o.get("status")})
+        else:
+            skipped.append(s)
+
+    return {
+        "ok":            True,
+        "market_open":   is_open,
+        "orders":        orders,
+        "skipped":       skipped,
+        "n_orders":      len(orders),
+        "note": ("Orders submitted; they fill at the next market open."
+                 if not is_open else "Orders submitted to live paper market."),
+        "account":       get_account(),
+    }

@@ -52,6 +52,30 @@ export default function PaperTradingPage() {
     }
   }
 
+  // ── Alpaca paper broker ──────────────────────────────────────────────────
+  const [alpaca, setAlpaca] = useState(null)
+  const [alpacaPf, setAlpacaPf] = useState(null)
+  const [alpacaMode, setAlpacaMode] = useState('rl')
+  const [alpacaResult, setAlpacaResult] = useState(null)
+
+  const refreshAlpaca = () => Promise.all([
+    client.get('/api/paper-trading/alpaca/status').then(r => setAlpaca(r.data)).catch(() => {}),
+    client.get('/api/paper-trading/alpaca/portfolio').then(r => setAlpacaPf(r.data)).catch(() => {}),
+  ])
+  useEffect(() => { refreshAlpaca() }, [])
+
+  const handleAlpacaRebalance = async () => {
+    setBusy(true); setAlpacaResult(null)
+    try {
+      const params = alpacaMode === 'meta' ? { mode: 'meta' } : { mode: 'rl', run_id: modelRunId }
+      const r = await client.post('/api/paper-trading/alpaca/rebalance', null, { params })
+      setAlpacaResult(r.data)
+      await refreshAlpaca()
+    } catch (e) {
+      setAlpacaResult({ ok: false, note: e.response?.data?.detail || 'Alpaca rebalance failed' })
+    } finally { setBusy(false) }
+  }
+
   const handleStart = async () => {
     setBusy(true)
     try {
@@ -138,6 +162,76 @@ export default function PaperTradingPage() {
             {rebal.ok
               ? `✓ ${rebal.message} — invested $${rebal.invested?.toLocaleString()} across ${rebal.positions_held} stocks (as of ${rebal.as_of})`
               : `✗ ${rebal.message}`}
+          </div>
+        )}
+      </div>
+
+      {/* Alpaca paper broker — real US-equity fills */}
+      <div className="bg-white border border-emerald-200 rounded-xl p-6 mb-6 max-w-3xl">
+        <div className="flex items-center gap-2 mb-1">
+          <h2 className="text-sm font-semibold text-gray-900">Alpaca Paper Broker — real fills</h2>
+          <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+            alpaca?.configured ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
+            {alpaca?.configured ? (alpaca?.market_open ? 'market open' : 'market closed') : 'not configured'}
+          </span>
+        </div>
+        <p className="text-xs text-gray-500 mb-4">
+          Submits real orders to your free Alpaca paper account (US equities = DOW30).
+          The model picks the allocation; Alpaca executes and tracks positions + P&L.
+        </p>
+        {alpaca?.configured && (
+          <div className="grid grid-cols-3 gap-3 mb-4">
+            {[['Equity', alpaca.equity], ['Cash', alpaca.cash], ['Buying Power', alpaca.buying_power]].map(([l, v]) => (
+              <div key={l} className="bg-gray-50 rounded-lg p-3">
+                <div className="text-xs text-gray-500">{l}</div>
+                <div className="text-lg font-bold text-gray-900">
+                  ${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className="flex items-center gap-2 mb-3">
+          <select value={alpacaMode} onChange={e => setAlpacaMode(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="rl">Single RL model (selected above)</option>
+            <option value="meta">Meta-learner ensemble (all 7)</option>
+          </select>
+          <button onClick={handleAlpacaRebalance} disabled={busy || !alpaca?.configured}
+            className="px-4 py-2 text-sm rounded-lg bg-emerald-600 text-white hover:bg-emerald-700 disabled:opacity-50">
+            {busy ? 'Submitting…' : 'Rebalance Alpaca with Model'}
+          </button>
+          <button onClick={refreshAlpaca}
+            className="px-3 py-2 text-xs rounded-lg border border-gray-300 hover:bg-gray-50">Refresh</button>
+        </div>
+        {alpacaResult && (
+          <div className={`text-xs rounded-lg p-3 mb-3 ${alpacaResult.ok ? 'bg-emerald-50 text-emerald-800' : 'bg-red-50 text-red-700'}`}>
+            {alpacaResult.ok
+              ? `✓ ${alpacaResult.model_message} — ${alpacaResult.n_orders} orders submitted. ${alpacaResult.note}`
+              : `✗ ${alpacaResult.note}`}
+          </div>
+        )}
+        {alpacaPf?.positions?.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead><tr className="border-b border-gray-100 text-gray-400">
+                <th className="text-left py-1">Symbol</th><th className="text-right">Qty</th>
+                <th className="text-right">Price</th><th className="text-right">Mkt Val</th><th className="text-right">P&L</th>
+              </tr></thead>
+              <tbody>
+                {alpacaPf.positions.map(p => (
+                  <tr key={p.symbol} className="border-b border-gray-50">
+                    <td className="py-1 font-medium">{p.symbol}</td>
+                    <td className="text-right">{p.qty.toFixed(2)}</td>
+                    <td className="text-right">${p.current_price.toFixed(2)}</td>
+                    <td className="text-right">${p.market_value.toFixed(0)}</td>
+                    <td className={`text-right ${p.unrealized_pl >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                      ${p.unrealized_pl.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
         )}
       </div>

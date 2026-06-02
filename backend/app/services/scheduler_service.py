@@ -21,7 +21,9 @@ logger = logging.getLogger(__name__)
 
 REBALANCE_HOUR_UTC = 21      # ~after US close (16:00–17:00 ET)
 CHECK_INTERVAL_SEC = 1800    # check every 30 min
-_last_run_date: str | None = None
+REBALANCE_WEEKDAY  = 0       # Monday — rebalance once per week (daily-trained
+                             # models + weekly cadence avoids friction churn)
+_last_run_week: str | None = None
 _started = False
 
 
@@ -51,11 +53,21 @@ def _apply(alloc: dict, cash: float, db, PaperSession):
     return True
 
 
-def _run_daily_rebalance():
+def _run_weekly_rebalance():
+    """
+    Weekly hands-off rebalance of the active paper session's model.
+
+    Routing:
+      - If Alpaca is configured → submit real orders to the Alpaca paper account
+        (model weights, with cash buffer).
+      - Else → update the internal Yahoo-simulated session positions.
+    Model: session.run_id == 'meta_learner' → ensemble, else single RL model.
+    """
     from app.database import SessionLocal, PaperSession
     from app.services.live_trading_service import (
         generate_live_allocation, generate_meta_allocation,
     )
+    from app.services import alpaca_service
     db = SessionLocal()
     try:
         from sqlalchemy import desc
@@ -63,48 +75,74 @@ def _run_daily_rebalance():
                .filter(PaperSession.running == True)  # noqa: E712
                .order_by(desc(PaperSession.created_at)).first())
         if not row:
-            logger.info("Daily rebalance: no active paper session — skipping")
+            logger.info("Weekly rebalance: no active paper session — skipping")
             return
         cash = float(row.initial_cash or 100_000.0)
         run_id = row.run_id or ""
+        # Use Alpaca equity as the budget when available
+        if alpaca_service.configured():
+            try:
+                cash = alpaca_service.get_account()["equity"]
+            except Exception:
+                pass
         if run_id == "meta_learner":
             alloc = generate_meta_allocation(cash)
         elif run_id:
             alloc = generate_live_allocation(run_id, cash)
         else:
-            logger.info("Daily rebalance: session has no run_id — skipping")
+            logger.info("Weekly rebalance: session has no run_id — skipping")
             return
-        if alloc.get("ok"):
-            _apply(alloc, cash, db, PaperSession)
+        if not alloc.get("ok"):
+            logger.warning("Weekly rebalance allocation failed: %s", alloc.get("message"))
+            return
+
+        if alpaca_service.configured():
+            # Model target (shares×price) → portfolio weights → Alpaca orders
+            tv = {t: alloc["target"].get(t, 0.0) * alloc["prices"].get(t, 0.0)
+                  for t in alloc["tickers"]}
+            tot = sum(v for v in tv.values() if v > 0)
+            weights = {t: v / tot for t, v in tv.items() if v > 0} if tot > 0 else {}
+            res = alpaca_service.rebalance_to_weights(weights)
+            logger.info("Weekly Alpaca rebalance: %s — %d orders (%s)",
+                        alloc.get("message", ""), res.get("n_orders", 0), res.get("note", ""))
         else:
-            logger.warning("Daily rebalance allocation failed: %s", alloc.get("message"))
+            _apply(alloc, cash, db, PaperSession)
     except Exception:
-        logger.exception("Daily rebalance crashed")
+        logger.exception("Weekly rebalance crashed")
     finally:
         db.close()
 
 
 def _loop():
-    global _last_run_date
+    global _last_run_week
     while True:
         try:
             now = datetime.now(timezone.utc)
-            today = now.strftime("%Y-%m-%d")
-            if now.hour >= REBALANCE_HOUR_UTC and _last_run_date != today:
-                logger.info("Triggering daily paper-trading rebalance for %s", today)
-                _run_daily_rebalance()
-                _last_run_date = today
+            iso_week = f"{now.isocalendar().year}-W{now.isocalendar().week}"
+            # Rebalance once per ISO week, on REBALANCE_WEEKDAY after close hour
+            if (now.weekday() == REBALANCE_WEEKDAY
+                    and now.hour >= REBALANCE_HOUR_UTC
+                    and _last_run_week != iso_week):
+                logger.info("Triggering weekly paper-trading rebalance (%s)", iso_week)
+                _run_weekly_rebalance()
+                _last_run_week = iso_week
         except Exception:
             logger.exception("Scheduler loop error")
         time.sleep(CHECK_INTERVAL_SEC)
 
 
+def trigger_rebalance_now():
+    """Manual one-off trigger (used by an API endpoint / testing)."""
+    _run_weekly_rebalance()
+
+
 def start_scheduler():
-    """Start the daily rebalance daemon thread (idempotent)."""
+    """Start the weekly rebalance daemon thread (idempotent)."""
     global _started
     if _started:
         return
     _started = True
     t = threading.Thread(target=_loop, name="paper-rebalance-scheduler", daemon=True)
     t.start()
-    logger.info("Paper-trading daily rebalance scheduler started (UTC hour=%d)", REBALANCE_HOUR_UTC)
+    logger.info("Paper-trading weekly rebalance scheduler started "
+                "(weekday=%d, UTC hour=%d, Alpaca-aware)", REBALANCE_WEEKDAY, REBALANCE_HOUR_UTC)
