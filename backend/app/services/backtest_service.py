@@ -355,6 +355,214 @@ def run_random_baseline(
         return {}
 
 
+def _rl_holdings_timeseries(featured, algo, model_path, initial_cash):
+    """Run an RL model over the window once; return {date_str: {tic: holding}}."""
+    from app.services.live_trading_service import _make_env
+    from stable_baselines3 import PPO, A2C, DDPG, TD3, SAC
+    cls = {"ppo": PPO, "a2c": A2C, "ddpg": DDPG, "td3": TD3, "sac": SAC}[algo]
+    env, tics, stock_dim = _make_env(featured, initial_cash)
+    model = cls.load(model_path)
+    reset_out = env.reset()
+    obs = reset_out[0] if isinstance(reset_out, tuple) else reset_out
+    out, done = {}, False
+    while not done:
+        action, _ = model.predict(obs, deterministic=True)
+        step = env.step(action)
+        if len(step) == 5:
+            obs, _, term, trunc, _ = step; done = term or trunc
+        else:
+            obs, _, done, _ = step
+        st = np.asarray(env.state, dtype=float)
+        hold = st[1 + stock_dim: 1 + 2 * stock_dim]
+        d = str(env.date_memory[-1]) if getattr(env, "date_memory", None) else None
+        if d:
+            out[d[:10]] = {tics[i]: float(hold[i]) for i in range(stock_dim)}
+    return out, tics
+
+
+def run_meta_backtest(backtest_id, run, test_start, test_end,
+                      initial_capital=1_000_000.0, commission_pct=0.001,
+                      slippage_pct=0.001) -> Dict[str, Any]:
+    """
+    Real backtest of the meta-learner ensemble.
+
+    Builds the 7 base signals + regime + VIX per (day, stock) across the window,
+    runs the meta-learner per row, then simulates a long-only portfolio that
+    rebalances weekly to weights ∝ meta-probability among BUY stocks (p>0.5),
+    with the same friction model. Reuses all baseline / walk-forward / stress /
+    significance machinery so the result matches the standard backtest shape.
+    """
+    import pickle
+    from app.services.feature_service import FEATURE_COLUMNS, download_vix
+    from app.services.live_trading_service import _download_live, _build_featured, LIVE_TICKERS
+    from app.services.meta_learner_service import predict_meta_learner
+
+    results_dir = Path(settings.results_dir) / backtest_id
+    results_dir.mkdir(parents=True, exist_ok=True)
+    deploy = Path(settings.models_dir) / "deploy"
+    meta_path = str(Path(settings.models_dir) / "meta_learner.pkl")
+
+    if not (deploy / "xgb_deploy.pkl").exists() or not Path(meta_path).exists():
+        raise ValueError("Meta backtest needs deployable base models + meta_learner.pkl "
+                         "(run scripts/train_deployable_models.py and Step 5).")
+
+    # ── Featured data for window + warmup ─────────────────────────────────────
+    warmup_start = (pd.Timestamp(test_start) - pd.Timedelta(days=400)).strftime("%Y-%m-%d")
+    raw   = _download_live(LIVE_TICKERS, warmup_start, test_end)
+    vixdf = download_vix(warmup_start, test_end)
+    featured = _build_featured(raw, vixdf)
+    featured["date"] = pd.to_datetime(featured["date"])
+    win = featured[(featured["date"] >= test_start) & (featured["date"] <= test_end)].copy()
+    if win.empty:
+        raise ValueError(f"No data for meta backtest window {test_start}…{test_end}")
+    win["d"] = win["date"].dt.strftime("%Y-%m-%d")
+    dates = sorted(win["d"].unique())
+    tics  = sorted(win["tic"].unique())
+
+    # ── XGBoost + LSTM (deployable, pooled) ───────────────────────────────────
+    with open(deploy / "xgb_deploy.pkl", "rb") as f:
+        xb = pickle.load(f); xgb_model, xgb_feats = xb["model"], xb["features"]
+    win_xgb = dict(zip(zip(win["d"], win["tic"]),
+                       xgb_model.predict_proba(win[xgb_feats].values.astype(np.float32))[:, 1]))
+
+    import torch, torch.nn as nn, pickle as pkl
+    ck = torch.load(deploy / "lstm_deploy.pt"); seq_len = ck["seq_len"]; lf = ck["features"]
+    with open(deploy / "lstm_scaler.pkl", "rb") as f:
+        lstm_scaler = pkl.load(f)
+    class _L(nn.Module):
+        def __init__(s, n):
+            super().__init__(); s.lstm = nn.LSTM(n, 64, 2, batch_first=True, dropout=0.3)
+            s.fc = nn.Linear(64, 1); s.sig = nn.Sigmoid()
+        def forward(s, x):
+            o, _ = s.lstm(x); return s.sig(s.fc(o[:, -1, :]))
+    lstm_model = _L(ck["n_features"]); lstm_model.load_state_dict(ck["state_dict"]); lstm_model.eval()
+    lstm_sig = {}
+    fe = featured.sort_values(["tic", "date"])
+    for tic in tics:
+        g = fe[fe["tic"] == tic]
+        Xs = lstm_scaler.transform(g[lf].values.astype(np.float32))
+        ds = g["date"].dt.strftime("%Y-%m-%d").tolist()
+        with torch.no_grad():
+            for i in range(seq_len - 1, len(Xs)):
+                if ds[i] in set(dates):
+                    seq = torch.tensor(Xs[i - seq_len + 1:i + 1]).unsqueeze(0)
+                    lstm_sig[(ds[i], tic)] = float(lstm_model(seq).item())
+
+    # ── 5 RL models → per-day holdings → per-stock signals ───────────────────
+    db = SessionLocal()
+    rl_sig = {}
+    for a in ["ppo", "a2c", "ddpg", "td3", "sac"]:
+        r = (db.query(Run).filter(Run.algorithm == a, Run.data_job_id == "step4_ckpt3").first()
+             or db.query(Run).filter(Run.algorithm == a, Run.status == "done").first())
+        if not r or not (r.model_path and Path(str(r.model_path) + ".zip").exists()):
+            continue
+        try:
+            holds, _ = _rl_holdings_timeseries(featured, a, r.model_path, initial_capital)
+            for d, hv in holds.items():
+                mx = max(hv.values()) if hv else 0
+                for t in tics:
+                    rl_sig[(a, d, t)] = (0.5 + 0.5 * hv.get(t, 0) / mx) if mx > 0 else 0.5
+        except Exception as exc:
+            logger.warning("meta backtest RL %s failed: %s", a, exc)
+    db.close()
+
+    # ── Regime + VIX ──────────────────────────────────────────────────────────
+    mkt = featured.groupby("date")["price_mom_20"].mean()
+    thr = float(mkt.std() * 0.5)
+    regime = {pd.Timestamp(d).strftime("%Y-%m-%d"): (int(v > thr), int(v < -thr))
+              for d, v in mkt.items()}
+    vix = dict(zip(zip(win["d"], win["tic"]), win["vix_zscore"].astype(float)))
+    close = dict(zip(zip(win["d"], win["tic"]), win["close"].astype(float)))
+
+    # ── Meta-learner probability per (day, stock) ─────────────────────────────
+    prob = {}
+    for d in dates:
+        rb, rbear = regime.get(d, (0, 0))
+        for t in tics:
+            fd = {
+                "xgb_signal": win_xgb.get((d, t), 0.5), "lstm_signal": lstm_sig.get((d, t), 0.5),
+                "ppo_signal": rl_sig.get(("ppo", d, t), 0.5), "a2c_signal": rl_sig.get(("a2c", d, t), 0.5),
+                "ddpg_signal": rl_sig.get(("ddpg", d, t), 0.5), "td3_signal": rl_sig.get(("td3", d, t), 0.5),
+                "sac_signal": rl_sig.get(("sac", d, t), 0.5), "regime_bull": rb, "regime_bear": rbear,
+                "sentiment_score": 0.0, "vix_zscore": vix.get((d, t), 0.0),
+            }
+            prob[(d, t)] = float(predict_meta_learner(meta_path, fd)["probability"])
+
+    # ── Simulate long-only, weekly rebalance ∝ prob among BUYs (p>0.5) ───────
+    cash = float(initial_capital); shares = {t: 0.0 for t in tics}
+    account_values, trades = [], []
+    for i, d in enumerate(dates):
+        px = {t: close.get((d, t), 0.0) for t in tics}
+        pv = cash + sum(shares[t] * px[t] for t in tics if px[t] > 0)
+        if i % 5 == 0:   # weekly rebalance
+            buys = {t: prob[(d, t)] for t in tics if prob.get((d, t), 0) > 0.5 and px[t] > 0}
+            wsum = sum(buys.values())
+            for t in tics:
+                if px[t] <= 0:
+                    continue
+                tgt_val = pv * (buys.get(t, 0.0) / wsum) if wsum > 0 else 0.0
+                cur_val = shares[t] * px[t]
+                delta_val = tgt_val - cur_val
+                if abs(delta_val) < pv * 0.01:   # ignore tiny rebalances
+                    continue
+                dshares = delta_val / px[t]
+                if dshares > 0:
+                    eff = _buy_price(px[t], commission_pct, slippage_pct)
+                    cost = dshares * eff
+                    if cost <= cash:
+                        cash -= cost; shares[t] += dshares
+                        trades.append({"date": d, "ticker": t, "action": "buy",
+                                       "shares": round(dshares, 4), "price": round(px[t], 2),
+                                       "effective_price": round(eff, 4)})
+                else:
+                    eff = _sell_price(px[t], commission_pct, slippage_pct)
+                    cash += -dshares * eff; shares[t] += dshares
+                    trades.append({"date": d, "ticker": t, "action": "sell",
+                                   "shares": round(-dshares, 4), "price": round(px[t], 2),
+                                   "effective_price": round(eff, 4)})
+        account_values.append(round(cash + sum(shares[t] * px[t] for t in tics if px[t] > 0), 2))
+
+    # ── Metrics + full report (reuse standard machinery) ─────────────────────
+    daily_returns = _compute_daily_returns(account_values)
+    metrics = _compute_metrics(account_values, daily_returns, initial_capital, trades)
+    seed = int(hashlib.sha256(run.id.encode()).hexdigest()[:8], 16)
+    benchmark = fetch_sp500_benchmark(test_start, test_end, initial_capital, commission_pct, slippage_pct)
+    result = {
+        "initial_capital": initial_capital,
+        "account_value":   account_values,
+        "daily_return":    [round(r, 6) for r in daily_returns],
+        "dates":           dates,
+        "metrics":         metrics,
+        "trades":          trades,
+        "benchmark":       benchmark,
+        "baselines": {
+            "buy_hold":      benchmark,
+            "sma_crossover": run_sma_crossover_baseline(test_start, test_end, initial_capital, commission_pct, slippage_pct),
+            "momentum":      run_momentum_baseline(test_start, test_end, initial_capital, commission_pct, slippage_pct),
+            "equal_weight":  run_equal_weight_baseline(test_start, test_end, initial_capital, commission_pct, slippage_pct),
+            "random":        run_random_baseline(test_start, test_end, initial_capital, commission_pct, slippage_pct, seed),
+        },
+        "walk_forward_periods": _walk_forward_rolling(account_values, dates, initial_capital)["windows"],
+        "walk_forward_summary": _walk_forward_rolling(account_values, dates, initial_capital)["summary"],
+        "stress_tests":    _run_stress_scenarios(account_values, dates, initial_capital, commission_pct, slippage_pct, seed),
+        "rl_sanity":       _rl_sanity_checks(trades, account_values, dates),
+        "regime_analysis": _regime_analysis(daily_returns, dates, trades),
+        "data_source":     "meta_learner_ensemble",
+        "data_quality":    {"live_prices": True,
+                            "message": f"Meta-learner ensemble — 7 base signals per stock, "
+                                       f"weekly rebalance, fresh Yahoo data {warmup_start}→{test_end}.",
+                            "issues": []},
+        "transaction_costs": {"commission_pct": commission_pct, "slippage_pct": slippage_pct,
+                              "note": "Long-only, weekly rebalance to weights ∝ meta-probability among BUY stocks."},
+        "methodology_notes": {"model": "Meta-learner stacking ensemble (7 base models + regime + VIX)",
+                              "allocation": "Long-only, weekly rebalance ∝ calibrated meta-probability (p>0.5)."},
+    }
+    metrics.update(_distribution_stats(daily_returns))
+    with open(results_dir / "result.json", "w") as f:
+        json.dump(result, f)
+    return result
+
+
 # ── Main backtest entry point ─────────────────────────────────────────────────
 
 def run_backtest(
@@ -378,6 +586,13 @@ def run_backtest(
     db.close()
     if not run:
         raise ValueError(f"Run {run_id} not found")
+
+    # Meta-learner is a stacking model (.pkl), not a FinRL portfolio policy (.zip).
+    # Route it to a dedicated backtest that simulates the ensemble allocation,
+    # instead of silently falling back to the synthetic engine.
+    if (run.algorithm or "").lower() == "meta_learner":
+        return run_meta_backtest(backtest_id, run, test_start, test_end,
+                                 initial_capital, commission_pct, slippage_pct)
 
     data_path   = Path(settings.data_dir) / run.data_job_id / "data.csv"
     model_path  = run.model_path
