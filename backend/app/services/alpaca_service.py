@@ -107,12 +107,62 @@ def get_portfolio_history(period: str = "all", timeframe: str = "1D") -> Dict[st
                 "total_return": 0.0, "total_pl": 0.0}
 
 
+# ── Risk overlay ───────────────────────────────────────────────────────────────
+
+DEFAULT_MAX_DRAWDOWN = 0.15   # 15% peak-to-current → kill switch
+
+
+def drawdown_status(max_drawdown_pct: float = DEFAULT_MAX_DRAWDOWN) -> Dict[str, Any]:
+    """
+    Compute peak-to-current drawdown from the account equity curve.
+    Returns {peak, current, drawdown, breached, threshold}.
+    """
+    hist = get_portfolio_history()
+    eq = hist["equity"] or [get_account()["equity"]]
+    peak = max(eq) if eq else 0.0
+    cur  = eq[-1] if eq else 0.0
+    dd = (peak - cur) / peak if peak > 0 else 0.0
+    return {"peak": round(peak, 2), "current": round(cur, 2),
+            "drawdown": round(dd, 4), "threshold": max_drawdown_pct,
+            "breached": dd >= max_drawdown_pct}
+
+
+def liquidate_all() -> Dict[str, Any]:
+    """Close every open position (go to cash). Used by the kill-switch."""
+    try:
+        r = requests.delete(f"{_BASE}/v2/positions", headers=_headers(),
+                            params={"cancel_orders": "true"}, timeout=20)
+        closed = r.json() if r.status_code < 400 else []
+        return {"ok": r.status_code < 400, "closed": len(closed) if isinstance(closed, list) else 0}
+    except Exception as exc:
+        logger.warning("liquidate_all failed: %s", exc)
+        return {"ok": False, "closed": 0, "error": str(exc)}
+
+
+def enforce_risk(max_drawdown_pct: float = DEFAULT_MAX_DRAWDOWN) -> Dict[str, Any]:
+    """
+    Kill switch: if drawdown ≥ threshold, liquidate all positions and report.
+    Returns the drawdown status plus any action taken.
+    """
+    st = drawdown_status(max_drawdown_pct)
+    if st["breached"]:
+        action = liquidate_all()
+        st["action"] = f"LIQUIDATED — drawdown {st['drawdown']*100:.1f}% ≥ {max_drawdown_pct*100:.0f}%"
+        st["liquidated"] = action
+        logger.warning("RISK KILL-SWITCH: %s", st["action"])
+    else:
+        st["action"] = "ok — within drawdown limit"
+        st["liquidated"] = None
+    return st
+
+
 def portfolio_snapshot() -> Dict[str, Any]:
     acct = get_account()
     pos  = get_positions()
     daily = ((acct["equity"] / acct["last_equity"] - 1.0)
              if acct["last_equity"] > 0 else 0.0)
     hist = get_portfolio_history()
+    dd   = drawdown_status()
     return {
         "configured":      True,
         "broker":          "alpaca_paper",
@@ -124,6 +174,8 @@ def portfolio_snapshot() -> Dict[str, Any]:
         "total_pl":        hist["total_pl"],
         "starting_value":  hist["base_value"],
         "equity_curve":    hist["equity"][-90:],          # last 90 points for a sparkline
+        "drawdown":        dd["drawdown"],
+        "drawdown_breached": dd["breached"],
         "market_open":     market_is_open(),
         "positions":       pos,
         "message":         "Live Alpaca paper account (real fills, US equities).",
