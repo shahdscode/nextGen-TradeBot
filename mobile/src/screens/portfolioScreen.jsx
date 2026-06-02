@@ -194,3 +194,5 @@ const styles = StyleSheet.create({
   posPl: { fontSize: 12, fontWeight: '600', marginTop: 2 },
   footer: { fontSize: 11, color: COLORS.textMuted, marginTop: 16, textAlign: 'center' },
 })
+
+// auto-sync test marker
