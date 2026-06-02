@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { LineChart, Line, ResponsiveContainer, YAxis, Tooltip } from 'recharts'
 import client from '../api/client'
 import { CardSkeleton } from '../components/skeleton'
 
@@ -174,6 +175,12 @@ export default function PaperTradingPage() {
             alpaca?.configured ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
             {alpaca?.configured ? (alpaca?.market_open ? 'market open' : 'market closed') : 'not configured'}
           </span>
+          {alpacaPf?.drawdown != null && (
+            <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+              alpacaPf.drawdown_breached ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
+              {alpacaPf.drawdown_breached ? '⚠ risk halt' : `drawdown ${(alpacaPf.drawdown*100).toFixed(1)}%`}
+            </span>
+          )}
         </div>
         <p className="text-xs text-gray-500 mb-4">
           Submits real orders to your free Alpaca paper account (US equities = DOW30).
@@ -232,6 +239,19 @@ export default function PaperTradingPage() {
             {alpacaResult.ok
               ? `✓ ${alpacaResult.model_message} — ${alpacaResult.n_orders} orders submitted. ${alpacaResult.note}`
               : `✗ ${alpacaResult.note}`}
+          </div>
+        )}
+        {alpacaPf?.equity_curve?.length > 2 && (
+          <div className="mb-4">
+            <div className="text-xs text-gray-500 mb-1">Equity curve (since inception)</div>
+            <ResponsiveContainer width="100%" height={140}>
+              <LineChart data={alpacaPf.equity_curve.map((v, i) => ({ i, equity: v }))}>
+                <YAxis domain={['dataMin', 'dataMax']} hide />
+                <Tooltip formatter={(v) => `$${Number(v).toLocaleString(undefined,{maximumFractionDigits:0})}`}
+                         labelFormatter={() => ''} />
+                <Line type="monotone" dataKey="equity" stroke="#059669" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
           </div>
         )}
         {alpacaPf?.positions?.length > 0 && (
