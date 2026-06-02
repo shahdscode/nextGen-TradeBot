@@ -433,6 +433,18 @@ def alpaca_portfolio():
         raise HTTPException(status_code=502, detail=f"Alpaca error: {e}")
 
 
+@router.post("/alpaca/risk-check")
+def alpaca_risk_check(max_drawdown_pct: float = 0.15):
+    """Run the drawdown kill-switch: liquidate all positions if drawdown ≥ threshold."""
+    from app.services import alpaca_service
+    if not alpaca_service.configured():
+        raise HTTPException(status_code=400, detail="Alpaca not configured")
+    try:
+        return alpaca_service.enforce_risk(max_drawdown_pct)
+    except Exception as e:
+        raise HTTPException(status_code=502, detail=f"Alpaca error: {e}")
+
+
 @router.post("/alpaca/rebalance")
 def alpaca_rebalance(run_id: str | None = None, mode: str = "rl"):
     """

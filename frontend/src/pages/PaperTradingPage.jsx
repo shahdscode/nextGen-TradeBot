@@ -1,4 +1,5 @@
 import { useState, useEffect } from 'react'
+import { LineChart, Line, ResponsiveContainer, YAxis, Tooltip } from 'recharts'
 import client from '../api/client'
 import { CardSkeleton } from '../components/skeleton'
 
@@ -174,21 +175,50 @@ export default function PaperTradingPage() {
             alpaca?.configured ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
             {alpaca?.configured ? (alpaca?.market_open ? 'market open' : 'market closed') : 'not configured'}
           </span>
+          {alpacaPf?.drawdown != null && (
+            <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+              alpacaPf.drawdown_breached ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
+              {alpacaPf.drawdown_breached ? '⚠ risk halt' : `drawdown ${(alpacaPf.drawdown*100).toFixed(1)}%`}
+            </span>
+          )}
         </div>
         <p className="text-xs text-gray-500 mb-4">
           Submits real orders to your free Alpaca paper account (US equities = DOW30).
           The model picks the allocation; Alpaca executes and tracks positions + P&L.
         </p>
         {alpaca?.configured && (
-          <div className="grid grid-cols-3 gap-3 mb-4">
-            {[['Equity', alpaca.equity], ['Cash', alpaca.cash], ['Buying Power', alpaca.buying_power]].map(([l, v]) => (
-              <div key={l} className="bg-gray-50 rounded-lg p-3">
-                <div className="text-xs text-gray-500">{l}</div>
-                <div className="text-lg font-bold text-gray-900">
-                  ${Number(v).toLocaleString(undefined, { maximumFractionDigits: 0 })}
-                </div>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
+            <div className="bg-gray-50 rounded-lg p-3">
+              <div className="text-xs text-gray-500">Equity</div>
+              <div className="text-lg font-bold text-gray-900">
+                ${Number(alpaca.equity).toLocaleString(undefined, { maximumFractionDigits: 0 })}
               </div>
-            ))}
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3">
+              <div className="text-xs text-gray-500">Total Return</div>
+              <div className={`text-lg font-bold ${(alpacaPf?.total_return ?? 0) >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                {alpacaPf?.total_return != null
+                  ? `${alpacaPf.total_return >= 0 ? '+' : ''}${(alpacaPf.total_return * 100).toFixed(2)}%`
+                  : '—'}
+              </div>
+              <div className="text-[10px] text-gray-400">
+                {alpacaPf?.total_pl != null
+                  ? `${alpacaPf.total_pl >= 0 ? '+' : ''}$${alpacaPf.total_pl.toLocaleString(undefined,{maximumFractionDigits:0})} since start`
+                  : ''}
+              </div>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3">
+              <div className="text-xs text-gray-500">Cash</div>
+              <div className="text-lg font-bold text-gray-900">
+                ${Number(alpaca.cash).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              </div>
+            </div>
+            <div className="bg-gray-50 rounded-lg p-3">
+              <div className="text-xs text-gray-500">Buying Power</div>
+              <div className="text-lg font-bold text-gray-900">
+                ${Number(alpaca.buying_power).toLocaleString(undefined, { maximumFractionDigits: 0 })}
+              </div>
+            </div>
           </div>
         )}
         <div className="flex items-center gap-2 mb-3">
@@ -209,6 +239,19 @@ export default function PaperTradingPage() {
             {alpacaResult.ok
               ? `✓ ${alpacaResult.model_message} — ${alpacaResult.n_orders} orders submitted. ${alpacaResult.note}`
               : `✗ ${alpacaResult.note}`}
+          </div>
+        )}
+        {alpacaPf?.equity_curve?.length > 2 && (
+          <div className="mb-4">
+            <div className="text-xs text-gray-500 mb-1">Equity curve (since inception)</div>
+            <ResponsiveContainer width="100%" height={140}>
+              <LineChart data={alpacaPf.equity_curve.map((v, i) => ({ i, equity: v }))}>
+                <YAxis domain={['dataMin', 'dataMax']} hide />
+                <Tooltip formatter={(v) => `$${Number(v).toLocaleString(undefined,{maximumFractionDigits:0})}`}
+                         labelFormatter={() => ''} />
+                <Line type="monotone" dataKey="equity" stroke="#059669" strokeWidth={2} dot={false} />
+              </LineChart>
+            </ResponsiveContainer>
           </div>
         )}
         {alpacaPf?.positions?.length > 0 && (

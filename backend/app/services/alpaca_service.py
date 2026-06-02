@@ -83,11 +83,86 @@ def get_positions() -> List[Dict[str, Any]]:
     return out
 
 
+def get_portfolio_history(period: str = "all", timeframe: str = "1D") -> Dict[str, Any]:
+    """
+    Account equity curve since inception (Alpaca tracks it natively).
+    Returns {timestamps[], equity[], base_value, total_return, total_pl}.
+    """
+    try:
+        h = _get("/account/portfolio/history", period=period, timeframe=timeframe)
+        eq = [float(x) for x in (h.get("equity") or []) if x is not None]
+        base = float(h.get("base_value") or (eq[0] if eq else 0.0))
+        last = eq[-1] if eq else base
+        total_ret = (last / base - 1.0) if base > 0 else 0.0
+        return {
+            "timestamps":   h.get("timestamp", []),
+            "equity":       eq,
+            "base_value":   round(base, 2),
+            "total_return": round(total_ret, 6),
+            "total_pl":     round(last - base, 2),
+        }
+    except Exception as exc:
+        logger.warning("portfolio history failed: %s", exc)
+        return {"timestamps": [], "equity": [], "base_value": 0.0,
+                "total_return": 0.0, "total_pl": 0.0}
+
+
+# ── Risk overlay ───────────────────────────────────────────────────────────────
+
+DEFAULT_MAX_DRAWDOWN = 0.15   # 15% peak-to-current → kill switch
+
+
+def drawdown_status(max_drawdown_pct: float = DEFAULT_MAX_DRAWDOWN) -> Dict[str, Any]:
+    """
+    Compute peak-to-current drawdown from the account equity curve.
+    Returns {peak, current, drawdown, breached, threshold}.
+    """
+    hist = get_portfolio_history()
+    eq = hist["equity"] or [get_account()["equity"]]
+    peak = max(eq) if eq else 0.0
+    cur  = eq[-1] if eq else 0.0
+    dd = (peak - cur) / peak if peak > 0 else 0.0
+    return {"peak": round(peak, 2), "current": round(cur, 2),
+            "drawdown": round(dd, 4), "threshold": max_drawdown_pct,
+            "breached": dd >= max_drawdown_pct}
+
+
+def liquidate_all() -> Dict[str, Any]:
+    """Close every open position (go to cash). Used by the kill-switch."""
+    try:
+        r = requests.delete(f"{_BASE}/v2/positions", headers=_headers(),
+                            params={"cancel_orders": "true"}, timeout=20)
+        closed = r.json() if r.status_code < 400 else []
+        return {"ok": r.status_code < 400, "closed": len(closed) if isinstance(closed, list) else 0}
+    except Exception as exc:
+        logger.warning("liquidate_all failed: %s", exc)
+        return {"ok": False, "closed": 0, "error": str(exc)}
+
+
+def enforce_risk(max_drawdown_pct: float = DEFAULT_MAX_DRAWDOWN) -> Dict[str, Any]:
+    """
+    Kill switch: if drawdown ≥ threshold, liquidate all positions and report.
+    Returns the drawdown status plus any action taken.
+    """
+    st = drawdown_status(max_drawdown_pct)
+    if st["breached"]:
+        action = liquidate_all()
+        st["action"] = f"LIQUIDATED — drawdown {st['drawdown']*100:.1f}% ≥ {max_drawdown_pct*100:.0f}%"
+        st["liquidated"] = action
+        logger.warning("RISK KILL-SWITCH: %s", st["action"])
+    else:
+        st["action"] = "ok — within drawdown limit"
+        st["liquidated"] = None
+    return st
+
+
 def portfolio_snapshot() -> Dict[str, Any]:
     acct = get_account()
     pos  = get_positions()
     daily = ((acct["equity"] / acct["last_equity"] - 1.0)
              if acct["last_equity"] > 0 else 0.0)
+    hist = get_portfolio_history()
+    dd   = drawdown_status()
     return {
         "configured":      True,
         "broker":          "alpaca_paper",
@@ -95,6 +170,12 @@ def portfolio_snapshot() -> Dict[str, Any]:
         "cash":            round(acct["cash"], 2),
         "buying_power":    round(acct["buying_power"], 2),
         "daily_return":    round(daily, 6),
+        "total_return":    hist["total_return"],          # since inception
+        "total_pl":        hist["total_pl"],
+        "starting_value":  hist["base_value"],
+        "equity_curve":    hist["equity"][-90:],          # last 90 points for a sparkline
+        "drawdown":        dd["drawdown"],
+        "drawdown_breached": dd["breached"],
         "market_open":     market_is_open(),
         "positions":       pos,
         "message":         "Live Alpaca paper account (real fills, US equities).",

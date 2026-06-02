@@ -97,6 +97,11 @@ def _run_weekly_rebalance():
             return
 
         if alpaca_service.configured():
+            # Risk kill-switch FIRST: if drawdown breached, liquidate & skip buy
+            risk = alpaca_service.enforce_risk()
+            if risk.get("breached"):
+                logger.warning("Weekly rebalance halted by risk overlay: %s", risk.get("action"))
+                return
             # Model target (shares×price) → portfolio weights → Alpaca orders
             tv = {t: alloc["target"].get(t, 0.0) * alloc["prices"].get(t, 0.0)
                   for t in alloc["tickers"]}
