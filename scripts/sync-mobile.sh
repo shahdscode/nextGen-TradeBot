@@ -21,6 +21,9 @@ cd "$ROOT"
 
 COMMIT="${1:-HEAD}"
 SHA="$(git rev-parse --short "$COMMIT" 2>/dev/null)" || exit 0
+# Resolve the FULL sha now (in the main repo). Inside the worktree, "HEAD"/the
+# ref would point at mobileapp, not the source commit — must use the explicit sha.
+FULL_SHA="$(git rev-parse "$COMMIT" 2>/dev/null)" || exit 0
 SRC_BRANCH="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)"
 
 # Skip if this commit doesn't touch mobile/
@@ -44,23 +47,30 @@ if ! git worktree add -q --detach "$WT" origin/mobileapp 2>/dev/null; then
   echo "[sync-mobile] could not create worktree — skipping"; exit 0
 fi
 
-# Apply ONLY the mobile/ portion of the commit as a new commit
-if git diff "${COMMIT}~1" "${COMMIT}" -- mobile/ | git -C "$WT" apply --index 2>/dev/null; then
-  if ! git -C "$WT" diff --cached --quiet; then
-    MSG="$(git log -1 --format=%s "$COMMIT")"
-    # core.hooksPath=/dev/null → this internal commit must NOT re-fire post-commit
-    git -C "$WT" -c core.hooksPath=/dev/null \
-        -c user.name="$(git config user.name)" \
-        -c user.email="$(git config user.email)" \
-        commit -q -m "${MSG} (auto-synced from ${SRC_BRANCH}@${SHA})"
-    if git -C "$WT" push -q origin HEAD:mobileapp; then
-      echo "[sync-mobile] ✓ synced mobile/ changes (${SHA}) → mobileapp"
-    else
-      echo "[sync-mobile] push to mobileapp failed (remote moved — run sync again)"
-    fi
-  else
-    echo "[sync-mobile] mobile/ changes already on mobileapp — nothing to do"
-  fi
+# Mirror the source commit's mobile/ tree exactly onto mobileapp (handles
+# additions, modifications AND deletions — git apply missed file removals).
+# Remove mobile/ from BOTH index and working tree, then restore it from the
+# source commit — guarantees deletions propagate (rm --cached left files behind,
+# so add -A re-added them). Safety: only proceed if the restored tree is non-empty.
+git -C "$WT" rm -r -q --ignore-unmatch mobile/ >/dev/null 2>&1 || true
+git -C "$WT" checkout "$FULL_SHA" -- mobile/ 2>/dev/null || true
+if [ -z "$(git -C "$WT" ls-files mobile/)" ]; then
+  echo "[sync-mobile] restored mobile/ is empty — aborting to avoid wiping mobileapp"; exit 0
+fi
+git -C "$WT" add -A mobile/
+
+if git -C "$WT" diff --cached --quiet; then
+  echo "[sync-mobile] mobile/ already matches mobileapp — nothing to do"
 else
-  echo "[sync-mobile] mobile/ diff didn't apply cleanly (likely already synced) — skipping"
+  MSG="$(git log -1 --format=%s "$COMMIT")"
+  # core.hooksPath=/dev/null → this internal commit must NOT re-fire post-commit
+  git -C "$WT" -c core.hooksPath=/dev/null \
+      -c user.name="$(git config user.name)" \
+      -c user.email="$(git config user.email)" \
+      commit -q -m "${MSG} (auto-synced from ${SRC_BRANCH}@${SHA})"
+  if git -C "$WT" push -q origin HEAD:mobileapp; then
+    echo "[sync-mobile] ✓ synced mobile/ changes (${SHA}) → mobileapp"
+  else
+    echo "[sync-mobile] push to mobileapp failed (remote moved — run sync again)"
+  fi
 fi
