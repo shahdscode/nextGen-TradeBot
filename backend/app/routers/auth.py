@@ -63,8 +63,15 @@ def login(req: LoginRequest):
 
 @router.get("/me")
 def me(user=Depends(require_auth)):
-    return {"username": user.username, "role": user.role, "email": user.email,
-            "alpaca_configured": bool(user.alpaca_api_key and user.alpaca_api_secret)}
+    created = user.created_at.isoformat() if getattr(user, "created_at", None) else None
+    return {
+        "username": user.username,
+        "role": user.role,
+        "email": user.email,
+        "created_at": created,
+        "is_active": getattr(user, "is_active", True),
+        "alpaca_configured": bool(user.alpaca_api_key and user.alpaca_api_secret),
+    }
 
 
 class AlpacaConfigRequest(BaseModel):
