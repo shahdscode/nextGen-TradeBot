@@ -20,18 +20,36 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+import contextvars
+
 _BASE = (settings.alpaca_base_url or "https://paper-api.alpaca.markets").rstrip("/")
+
+# Per-request credentials override. The router sets this from the logged-in
+# user's saved keys so each user trades their OWN Alpaca paper account. When
+# unset (scheduler / web-admin), it falls back to the global .env keys.
+_creds_var: "contextvars.ContextVar" = contextvars.ContextVar("alpaca_creds", default=None)
+
+
+def use_credentials(api_key: str | None, api_secret: str | None) -> None:
+    """Set the Alpaca creds for the current request context (per-user)."""
+    _creds_var.set((api_key, api_secret) if (api_key and api_secret) else None)
+
+
+def _active_creds():
+    c = _creds_var.get()
+    if c and c[0] and c[1]:
+        return c
+    return (settings.alpaca_api_key, settings.alpaca_api_secret)
 
 
 def configured() -> bool:
-    return bool(settings.alpaca_api_key and settings.alpaca_api_secret)
+    k, s = _active_creds()
+    return bool(k and s)
 
 
 def _headers() -> Dict[str, str]:
-    return {
-        "APCA-API-KEY-ID":     settings.alpaca_api_key,
-        "APCA-API-SECRET-KEY": settings.alpaca_api_secret,
-    }
+    k, s = _active_creds()
+    return {"APCA-API-KEY-ID": k, "APCA-API-SECRET-KEY": s}
 
 
 def _get(path: str, **params):

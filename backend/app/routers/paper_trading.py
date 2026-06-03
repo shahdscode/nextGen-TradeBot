@@ -9,10 +9,20 @@ from datetime import datetime
 from typing import Any, List
 
 import requests
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 
 from app.config import settings
 from app.database import SessionLocal, PaperSession
+from app.services.auth_service import require_auth
+
+
+def _apply_user_alpaca(user):
+    """Point the Alpaca client at the logged-in user's own keys for this request."""
+    from app.services import alpaca_service
+    alpaca_service.use_credentials(
+        getattr(user, "alpaca_api_key", None),
+        getattr(user, "alpaca_api_secret", None),
+    )
 
 router = APIRouter(prefix="/paper-trading", tags=["paper-trading"])
 
@@ -406,12 +416,13 @@ def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
 
 
 @router.get("/alpaca/status")
-def alpaca_status():
-    """Alpaca paper account status + market clock."""
+def alpaca_status(user=Depends(require_auth)):
+    """Alpaca paper account status + market clock (uses the user's own keys)."""
     from app.services import alpaca_service
+    _apply_user_alpaca(user)
     if not alpaca_service.configured():
         return {"configured": False,
-                "message": "Set ALPACA_API_KEY / ALPACA_API_SECRET in .env"}
+                "message": "Add your Alpaca API keys in Profile to enable paper trading"}
     try:
         acct = alpaca_service.get_account()
         return {"configured": True, "broker": "alpaca_paper",
@@ -421,12 +432,13 @@ def alpaca_status():
 
 
 @router.get("/alpaca/portfolio")
-def alpaca_portfolio():
-    """Live positions + P&L from the Alpaca paper account."""
+def alpaca_portfolio(user=Depends(require_auth)):
+    """Live positions + P&L from the user's Alpaca paper account."""
     from app.services import alpaca_service
+    _apply_user_alpaca(user)
     if not alpaca_service.configured():
         return {"configured": False, "positions": [],
-                "message": "Set ALPACA_API_KEY / ALPACA_API_SECRET in .env"}
+                "message": "Add your Alpaca API keys in Profile to enable paper trading"}
     try:
         return alpaca_service.portfolio_snapshot()
     except Exception as e:
@@ -434,11 +446,12 @@ def alpaca_portfolio():
 
 
 @router.post("/alpaca/risk-check")
-def alpaca_risk_check(max_drawdown_pct: float = 0.15):
-    """Run the drawdown kill-switch: liquidate all positions if drawdown ≥ threshold."""
+def alpaca_risk_check(max_drawdown_pct: float = 0.15, user=Depends(require_auth)):
+    """Run the drawdown kill-switch on the user's account."""
     from app.services import alpaca_service
+    _apply_user_alpaca(user)
     if not alpaca_service.configured():
-        raise HTTPException(status_code=400, detail="Alpaca not configured")
+        raise HTTPException(status_code=400, detail="Alpaca not configured for this user")
     try:
         return alpaca_service.enforce_risk(max_drawdown_pct)
     except Exception as e:
@@ -446,7 +459,7 @@ def alpaca_risk_check(max_drawdown_pct: float = 0.15):
 
 
 @router.post("/alpaca/rebalance")
-def alpaca_rebalance(run_id: str | None = None, mode: str = "rl"):
+def alpaca_rebalance(run_id: str | None = None, mode: str = "rl", user=Depends(require_auth)):
     """
     Run the model on live DOW30 data and rebalance the ALPACA paper account to
     the model's target weights (real broker orders). mode='rl' (single model,
@@ -456,6 +469,7 @@ def alpaca_rebalance(run_id: str | None = None, mode: str = "rl"):
     from app.services.live_trading_service import (
         generate_live_allocation, generate_meta_allocation)
 
+    _apply_user_alpaca(user)
     if not alpaca_service.configured():
         raise HTTPException(status_code=400,
                             detail="Alpaca not configured — set keys in .env")
