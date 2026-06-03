@@ -12,8 +12,8 @@ import HomeScreen      from '../screens/homeScreen'
 import SignalsScreen   from '../screens/signalsScreen'
 import MarketScreen    from '../screens/marketScreen'
 import LeaderboardScreen from '../screens/leaderboardScreen'
-import SimulatorScreen from '../screens/simulatorScreen'
 import PortfolioScreen from '../screens/portfolioScreen'
+import ProfileScreen from '../screens/profileScreen'
 
 const Stack = createNativeStackNavigator()
 const Tab   = createBottomTabNavigator()
@@ -24,7 +24,7 @@ const tabIcons = {
   Signals: 'pulse-outline',
   Market: 'bar-chart-outline',
   Leaderboard: 'trophy-outline',
-  Simulator: 'flask-outline',
+  Profile: 'person-outline',
 }
 
 function TabIcon({ label, focused }) {
@@ -66,7 +66,7 @@ function MainTabs() {
       <Tab.Screen name="Signals" component={SignalsScreen} />
       <Tab.Screen name="Market" component={MarketScreen} />
       <Tab.Screen name="Leaderboard" component={LeaderboardScreen} />
-      <Tab.Screen name="Simulator" component={SimulatorScreen} />
+      <Tab.Screen name="Profile" component={ProfileScreen} />
     </Tab.Navigator>
   )
 }
