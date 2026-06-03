@@ -216,9 +216,9 @@ export default function MarketScreen() {
           </View>
 
           {chartLoading ? (
-            <ActivityIndicator color={COLORS.teal} style={{ height: 220 }} />
+            <ActivityIndicator color={COLORS.teal} style={{ height: 240 }} />
           ) : candles.length > 1 && isLiveMarketSource(candles[0]?.source) ? (
-            <CandleChart data={candles} width={chartW} height={220} />
+            <CandleChart data={candles} width={chartW} height={240} />
           ) : (
             <View style={styles.noChart}>
               <Text style={styles.noChartText}>
