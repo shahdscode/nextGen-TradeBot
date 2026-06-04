@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react'
 import {
   View, Text, ScrollView, StyleSheet, RefreshControl, ActivityIndicator,
+  TouchableOpacity, Modal, Pressable, Alert,
 } from 'react-native'
 import Svg, { Polyline } from 'react-native-svg'
 
@@ -32,19 +33,49 @@ export default function PortfolioScreen() {
   const [refreshing, setRefreshing] = useState(false)
   const [err, setErr] = useState(null)
   const [updatedAt, setUpdatedAt] = useState(null)
+  const [runs, setRuns] = useState([])
+  const [picker, setPicker] = useState(false)
+  const [rebalancing, setRebalancing] = useState(false)
 
   const load = useCallback(() => {
     return Promise.all([
       client.get('/api/paper-trading/alpaca/portfolio').catch(e => { throw e }),
       client.get('/api/paper-trading/alpaca/status').catch(() => null),
-    ]).then(([p, s]) => {
+      client.get('/api/train/runs/published').catch(() => null),
+    ]).then(([p, s, r]) => {
       setPf(p.data); setStatus(s?.data); setErr(null)
+      const rl = (r?.data || []).filter(x => ['ppo','a2c','ddpg','td3','sac'].includes(x.algorithm))
+      setRuns(rl)
       setUpdatedAt(new Date())
     }).catch(e => setErr(e.response?.data?.detail || 'Could not load Alpaca portfolio'))
   }, [])
 
   useEffect(() => { load().finally(() => setLoading(false)) }, [load])
   const onRefresh = () => { setRefreshing(true); load().finally(() => setRefreshing(false)) }
+
+  // Run a model on live data and rebalance the Alpaca account
+  const rebalance = async ({ mode, run_id }) => {
+    setPicker(false)
+    setRebalancing(true)
+    try {
+      const params = mode === 'meta' ? { mode: 'meta' } : { mode: 'rl', run_id }
+      const { data } = await client.post('/api/paper-trading/alpaca/rebalance', null, {
+        params, timeout: 300000,
+      })
+      Alert.alert('Rebalanced', `${data.model_message || 'Done'}\n${data.n_orders} orders submitted.`)
+      await load()
+    } catch (e) {
+      Alert.alert('Rebalance failed', e.response?.data?.detail || 'Could not rebalance')
+    } finally {
+      setRebalancing(false)
+    }
+  }
+
+  const confirmRebalance = (opt) => Alert.alert(
+    'Run model & rebalance?',
+    'This places real orders on your Alpaca paper account to match the model\'s target allocation.',
+    [{ text: 'Cancel', style: 'cancel' }, { text: 'Rebalance', onPress: () => rebalance(opt) }],
+  )
 
   const fmt = (v, d = 2) => Number(v ?? 0).toLocaleString(undefined,
     { minimumFractionDigits: d, maximumFractionDigits: d })
@@ -116,6 +147,24 @@ export default function PortfolioScreen() {
             </View>
           )}
 
+          {/* Run model / rebalance */}
+          {pf?.configured !== false && (
+            <TouchableOpacity
+              style={[styles.rebalanceBtn, rebalancing && { opacity: 0.6 }]}
+              onPress={() => setPicker(true)}
+              disabled={rebalancing}
+            >
+              {rebalancing ? (
+                <ActivityIndicator color="#fff" />
+              ) : (
+                <Text style={styles.rebalanceText}>Run Model · Rebalance</Text>
+              )}
+            </TouchableOpacity>
+          )}
+          <Text style={styles.rebalanceHint}>
+            Runs the model on live data and places orders on your Alpaca account.
+          </Text>
+
           {/* Positions */}
           <Text style={styles.sectionTitle}>Holdings</Text>
           {(!pf?.positions || pf.positions.length === 0) ? (
@@ -142,11 +191,60 @@ export default function PortfolioScreen() {
           )}
         </ScrollView>
       )}
+
+      {/* Model picker modal */}
+      <Modal visible={picker} transparent animationType="fade" onRequestClose={() => setPicker(false)}>
+        <Pressable style={styles.modalBg} onPress={() => setPicker(false)}>
+          <Pressable style={styles.modalCard} onPress={() => {}}>
+            <Text style={styles.modalTitle}>Choose a model</Text>
+            <TouchableOpacity style={styles.modalOpt} onPress={() => confirmRebalance({ mode: 'meta' })}>
+              <Text style={styles.modalOptTitle}>Meta-Learner ensemble</Text>
+              <Text style={styles.modalOptSub}>All 7 models combined (slower, ~3–5 min)</Text>
+            </TouchableOpacity>
+            {runs.slice(0, 6).map((r) => {
+              const ck = r.data_job_id?.match(/ckpt(\d)/)?.[1]
+              const sh = r.metrics?.sharpe_ratio
+              return (
+                <TouchableOpacity key={r.run_id} style={styles.modalOpt}
+                  onPress={() => confirmRebalance({ mode: 'rl', run_id: r.run_id })}>
+                  <Text style={styles.modalOptTitle}>
+                    {r.algorithm?.toUpperCase()}{ck ? ` · ckpt${ck}` : ''}
+                  </Text>
+                  <Text style={styles.modalOptSub}>
+                    {sh != null ? `Sharpe ${sh.toFixed(2)} · ` : ''}{r.run_id.slice(0, 8)}
+                  </Text>
+                </TouchableOpacity>
+              )
+            })}
+            {runs.length === 0 && (
+              <Text style={styles.hint}>No published RL models — use Meta-Learner or publish a run.</Text>
+            )}
+          </Pressable>
+        </Pressable>
+      </Modal>
     </View>
   )
 }
 
 const styles = StyleSheet.create({
+  rebalanceBtn: {
+    backgroundColor: COLORS.teal, borderRadius: RADIUS.md, paddingVertical: 14,
+    alignItems: 'center', marginTop: 4, marginBottom: 6,
+  },
+  rebalanceText: { color: '#fff', fontWeight: '700', fontSize: 15 },
+  rebalanceHint: { color: COLORS.textMuted, fontSize: 11, textAlign: 'center', marginBottom: 18 },
+  modalBg: { flex: 1, backgroundColor: 'rgba(0,0,0,0.6)', justifyContent: 'flex-end' },
+  modalCard: {
+    backgroundColor: COLORS.card, borderTopLeftRadius: 20, borderTopRightRadius: 20,
+    padding: 20, paddingBottom: 36,
+  },
+  modalTitle: { color: COLORS.textPrimary, fontSize: 16, fontWeight: '700', marginBottom: 14 },
+  modalOpt: {
+    backgroundColor: COLORS.bg, borderWidth: 1, borderColor: COLORS.cardBorder,
+    borderRadius: RADIUS.md, padding: 14, marginBottom: 10,
+  },
+  modalOptTitle: { color: COLORS.textPrimary, fontSize: 14, fontWeight: '600' },
+  modalOptSub: { color: COLORS.textMuted, fontSize: 12, marginTop: 2 },
   root: { flex: 1, backgroundColor: COLORS.bg },
   header: {
     flexDirection: 'row', justifyContent: 'space-between', alignItems: 'flex-start',
