@@ -53,13 +53,17 @@ DB_PATH       = ROOT / "data" / "finrl.db"
 # ── 3-Checkpoint expanding windows ────────────────────────────────────────────
 # Each checkpoint trains on all data up to train_end,
 # then collects signals on [signal_start, signal_end] — data it never saw.
+from datetime import datetime as _dt
+_TODAY = _dt.utcnow().strftime("%Y-%m-%d")
+# Expanding-window checkpoints, shifted to current data. Ckpt 3 (used for LIVE
+# trading) now trains through end of 2025 → models reflect recent market action.
 CHECKPOINTS = [
-    {"ckpt": 1, "train_start": "2019-01-01", "train_end": "2021-12-31",
-               "signal_start": "2022-01-01", "signal_end": "2022-12-31"},
-    {"ckpt": 2, "train_start": "2019-01-01", "train_end": "2022-12-31",
-               "signal_start": "2023-01-01", "signal_end": "2023-12-31"},
-    {"ckpt": 3, "train_start": "2019-01-01", "train_end": "2023-12-31",
+    {"ckpt": 1, "train_start": "2019-01-01", "train_end": "2023-12-31",
                "signal_start": "2024-01-01", "signal_end": "2024-12-31"},
+    {"ckpt": 2, "train_start": "2019-01-01", "train_end": "2024-12-31",
+               "signal_start": "2025-01-01", "signal_end": "2025-12-31"},
+    {"ckpt": 3, "train_start": "2019-01-01", "train_end": "2025-12-31",
+               "signal_start": "2026-01-01", "signal_end": _TODAY},
 ]
 
 ALGOS = ["ppo", "a2c", "ddpg", "td3", "sac"]

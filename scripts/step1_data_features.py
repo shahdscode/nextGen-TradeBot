@@ -50,8 +50,9 @@ logging.basicConfig(
 logger = logging.getLogger("step1")
 
 # ── Config ─────────────────────────────────────────────────────────────────────
+from datetime import datetime as _dt
 START_DATE  = "2019-01-01"   # 1 year warmup before 2020-01-01 for turbulence lookback
-END_DATE    = "2024-12-31"
+END_DATE    = _dt.utcnow().strftime("%Y-%m-%d")   # through TODAY — keep models current
 TRAIN_MONTHS = 12
 TEST_MONTHS  = 1
 
