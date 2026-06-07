@@ -169,6 +169,43 @@ are reported only to characterise behaviour, not to claim a live edge:
 
 ---
 
+### 3.6 Experiment — regime-conditional stacking
+
+**Hypothesis.** The additive logistic stack cannot learn *which base model to trust in
+which regime* — an additive `regime_bull` term only shifts the global intercept. Encoding
+**interaction terms** (`signalᵢ × regime`) or using a **non-linear meta-learner** should,
+in principle, let the ensemble do regime-dependent model selection and lift AUC.
+
+**Design.** Three meta-learners on the identical time-ordered 70/30 split, no leakage:
+
+- **A. Logistic (baseline):** 7 signals + `regime_bull/bear` + `vix_zscore`.
+- **B. Logistic + interactions:** A + `signalᵢ × {bull, bear, vix}` (21 added terms).
+- **C. XGBoost meta:** same features as B, non-linear (captures interactions automatically).
+
+**Result.**
+
+| Meta-learner | AUC | Accuracy | Brier | ΔAUC vs A |
+|--------------|----:|---------:|------:|----------:|
+| A. Logistic (baseline) | **0.5240** | 0.5362 | 0.2491 | — |
+| B. Logistic + interactions | 0.5132 | 0.5333 | 0.2501 | **−0.0108** |
+| C. XGBoost meta (non-linear) | 0.5064 | 0.5384 | 0.2527 | **−0.0176** |
+
+**Hypothesis rejected.** Regime-conditioning did not help — it *reduced* out-of-sample
+AUC, monotonically with added capacity (interactions worse than baseline; XGBoost worse
+still). The mechanism is the **bias-variance tradeoff**: when base signals are ~0.51 AUC
+(near-random), extra parameters fit spurious regime-dependent structure in the training
+split that does not generalise. The most regularised model (additive logistic) wins. This
+is Occam's razor operating exactly as predicted under weak signal.
+
+**Corollary on the weight disagreement.** The learned logistic weights (LSTM/A2C-heavy)
+and the adaptive EWMA weights (XGBoost-heavy) rank the models very differently. Because
+regime interactions extracted *no* additional signal, this disagreement is best attributed
+to the two schemes optimising **different objectives** (5-day-forward direction vs recent
+cross-sectional hit-rate) under near-zero signal — not to exploitable regime alpha. In
+other words, the signal is too weak to pin down a stable "best" model.
+
+---
+
 ## 4. Discussion
 
 1. **Market efficiency holds on this universe.** Across XGBoost, LSTM, five RL agents,
