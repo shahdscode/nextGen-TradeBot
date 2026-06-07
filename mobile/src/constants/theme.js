@@ -18,6 +18,8 @@ export const COLORS = {
   amberBg: 'rgba(245,158,11,0.1)',
   blue: '#3B82F6',
   purple: '#A855F7',
+  purpleDim: '#7C3AED',
+  purpleBg: 'rgba(168,85,247,0.12)',
   tabBar: '#0F172A',
   tabActive: '#14B8A6',
   tabInactive: '#64748B',

@@ -6,17 +6,22 @@ import { Ionicons } from '@expo/vector-icons'
 
 import { useAuth } from '../context/authContext'
 import { COLORS } from '../constants/theme'
+import BrandHeader from '../components/brandHeader'
 
-import LoginScreen     from '../screens/loginScreen'
-import HomeScreen      from '../screens/homeScreen'
-import SignalsScreen   from '../screens/signalsScreen'
-import MarketScreen    from '../screens/marketScreen'
+import SplashScreen from '../screens/splashScreen'
+import WelcomeScreen from '../screens/welcomeScreen'
+import SignInScreen from '../screens/signInScreen'
+import SignUpScreen from '../screens/signUpScreen'
+import HomeScreen from '../screens/homeScreen'
+import SignalsScreen from '../screens/signalsScreen'
+import MarketScreen from '../screens/marketScreen'
 import LeaderboardScreen from '../screens/leaderboardScreen'
-import SimulatorScreen from '../screens/simulatorScreen'
 import PortfolioScreen from '../screens/portfolioScreen'
+import ProfileScreen from '../screens/profileScreen'
 
 const Stack = createNativeStackNavigator()
-const Tab   = createBottomTabNavigator()
+const Tab = createBottomTabNavigator()
+const AuthStack = createNativeStackNavigator()
 
 const tabIcons = {
   Home: 'home-outline',
@@ -24,16 +29,17 @@ const tabIcons = {
   Signals: 'pulse-outline',
   Market: 'bar-chart-outline',
   Leaderboard: 'trophy-outline',
-  Simulator: 'flask-outline',
+  Profile: 'person-outline',
 }
 
-function TabIcon({ label, focused }) {
+function TabIcon({ label, focused, color }) {
   const name = tabIcons[label] || 'ellipse-outline'
+  const active = color || COLORS.teal
   return (
     <Ionicons
       name={name}
       size={24}
-      color={focused ? COLORS.teal : COLORS.tabInactive}
+      color={focused ? active : COLORS.tabInactive}
     />
   )
 }
@@ -56,25 +62,46 @@ function MainTabs() {
           fontWeight: '600',
           marginTop: 2,
         },
-        tabBarActiveTintColor: COLORS.teal,
+        tabBarActiveTintColor: route.name === 'Profile' ? COLORS.purple : COLORS.teal,
         tabBarInactiveTintColor: COLORS.tabInactive,
-        tabBarIcon: ({ focused }) => <TabIcon label={route.name} focused={focused} />,
+        tabBarIcon: ({ focused }) => (
+          <TabIcon
+            label={route.name}
+            focused={focused}
+            color={route.name === 'Profile' && focused ? COLORS.purple : undefined}
+          />
+        ),
       })}
     >
       <Tab.Screen name="Home" component={HomeScreen} />
-      <Tab.Screen name="Portfolio" component={PortfolioScreen} />
-      <Tab.Screen name="Signals" component={SignalsScreen} />
       <Tab.Screen name="Market" component={MarketScreen} />
+      <Tab.Screen name="Signals" component={SignalsScreen} />
+      <Tab.Screen name="Portfolio" component={PortfolioScreen} />
       <Tab.Screen name="Leaderboard" component={LeaderboardScreen} />
-      <Tab.Screen name="Simulator" component={SimulatorScreen} />
+      <Tab.Screen name="Profile" component={ProfileScreen} />
     </Tab.Navigator>
   )
 }
 
-function LoadingScreen() {
+function AuthFlow() {
+  return (
+    <AuthStack.Navigator
+      screenOptions={{ headerShown: false, animation: 'fade' }}
+      initialRouteName="Splash"
+    >
+      <AuthStack.Screen name="Splash" component={SplashScreen} />
+      <AuthStack.Screen name="Welcome" component={WelcomeScreen} />
+      <AuthStack.Screen name="SignIn" component={SignInScreen} />
+      <AuthStack.Screen name="SignUp" component={SignUpScreen} />
+    </AuthStack.Navigator>
+  )
+}
+
+function BootLoading() {
   return (
     <View style={styles.loading}>
-      <ActivityIndicator color={COLORS.teal} size="large" />
+      <BrandHeader size="large" subtitle="Loading…" />
+      <ActivityIndicator color={COLORS.teal} size="large" style={styles.spinner} />
     </View>
   )
 }
@@ -82,7 +109,7 @@ function LoadingScreen() {
 export default function AppNavigator() {
   const { user, loading } = useAuth()
 
-  if (loading) return <LoadingScreen />
+  if (loading) return <BootLoading />
 
   return (
     <NavigationContainer>
@@ -90,7 +117,11 @@ export default function AppNavigator() {
         {user ? (
           <Stack.Screen name="Main" component={MainTabs} />
         ) : (
-          <Stack.Screen name="Login" component={LoginScreen} />
+          <Stack.Screen
+            name="Auth"
+            component={AuthFlow}
+            options={{ animation: 'fade' }}
+          />
         )}
       </Stack.Navigator>
     </NavigationContainer>
@@ -103,5 +134,7 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.bg,
     alignItems: 'center',
     justifyContent: 'center',
+    paddingHorizontal: 32,
   },
+  spinner: { marginTop: 32 },
 })

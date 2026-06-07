@@ -3,7 +3,7 @@ import {
   View, Text, FlatList, TouchableOpacity, ScrollView,
   RefreshControl, StyleSheet, ActivityIndicator, Dimensions,
 } from 'react-native'
-import LineChart from '../components/lineChart'
+import CandleChart from '../components/candleChart'
 import DataSourceBadge from '../components/dataSourceBadge'
 import client from '../api/client'
 import {
@@ -21,10 +21,23 @@ const screenW = Dimensions.get('window').width
 
 const changeColor = (pct) => (pct > 0 ? COLORS.green : pct < 0 ? COLORS.red : COLORS.textMuted)
 
+// Selectable chart durations (default 3M). value = yfinance period.
+const PERIODS = [
+  { label: '1M', value: '1mo' },
+  { label: '3M', value: '3mo' },
+  { label: '6M', value: '6mo' },
+  { label: '1Y', value: '1y' },
+  { label: '2Y', value: '2y' },
+  { label: '5Y', value: '5y' },
+]
+const PERIOD_LABEL = { '1mo': '1-Month', '3mo': '3-Month', '6mo': '6-Month',
+  '1y': '1-Year', '2y': '2-Year', '5y': '5-Year' }
+
 export default function MarketScreen() {
   const [market, setMarket] = useState('us')
   const [overview, setOverview] = useState([])
   const [selected, setSelected] = useState(null)
+  const [period, setPeriod] = useState('3mo')
   const [candles, setCandles] = useState([])
   const [quote, setQuote] = useState(null)
   const [news, setNews] = useState(null)
@@ -69,36 +82,54 @@ export default function MarketScreen() {
 
   useEffect(() => { setLoading(true); fetchOverview() }, [fetchOverview])
 
-  const selectTicker = async (ticker) => {
-    setSelected(ticker)
+  // Fetch OHLC candles for a ticker over a given period (interval auto-scales
+  // for long ranges so charts stay readable). Preserves full OHLC for candlesticks.
+  const fetchCandles = useCallback(async (ticker, p) => {
     setChartLoading(true)
     const allowDemo = dataStatus?.demo_fallback_enabled === true
-    const marketOpts = { allowDemo }
+    const interval = (p === '2y' || p === '5y') ? '1wk' : '1d'
     try {
-      const [c, q, n] = await Promise.allSettled([
-        client.get(`/api/market/candles/${ticker}`, { params: { period: '3mo', interval: '1d' } }),
-        client.get(`/api/market/quote/${ticker}`),
-        client.get(`/api/market/news/${ticker}`),
-      ])
-      if (c.status === 'fulfilled') {
-        const rows = acceptMarketCandles(c.value.data || [], marketOpts)
-        setCandles(rows.map((d) => ({ date: d.date?.slice(0, 10), value: d.close, source: d.source })))
-      } else setCandles([])
-      if (q.status === 'fulfilled') setQuote(acceptMarketQuote(q.value.data, marketOpts))
-      else setQuote(null)
-      if (n.status === 'fulfilled') {
-        const liveNews = acceptMarketNews(n.value.data, marketOpts)
-        if (liveNews?.headlines) {
-          liveNews.headlines = liveNews.headlines.map(cleanHeadline)
-        }
-        setNews(liveNews)
-      } else setNews(null)
+      const c = await client.get(`/api/market/candles/${ticker}`, {
+        params: { period: p, interval },
+      })
+      const rows = acceptMarketCandles(c.data || [], { allowDemo })
+      setCandles(rows.map((d) => ({
+        date: d.date?.slice(0, 10),
+        open: d.open, high: d.high, low: d.low, close: d.close,
+        source: d.source,
+      })))
+    } catch {
+      setCandles([])
     } finally {
       setChartLoading(false)
     }
+  }, [dataStatus])
+
+  const selectTicker = async (ticker) => {
+    setSelected(ticker)
+    const allowDemo = dataStatus?.demo_fallback_enabled === true
+    const marketOpts = { allowDemo }
+    fetchCandles(ticker, period)
+    const [q, n] = await Promise.allSettled([
+      client.get(`/api/market/quote/${ticker}`),
+      client.get(`/api/market/news/${ticker}`),
+    ])
+    if (q.status === 'fulfilled') setQuote(acceptMarketQuote(q.value.data, marketOpts))
+    else setQuote(null)
+    if (n.status === 'fulfilled') {
+      const liveNews = acceptMarketNews(n.value.data, marketOpts)
+      if (liveNews?.headlines) liveNews.headlines = liveNews.headlines.map(cleanHeadline)
+      setNews(liveNews)
+    } else setNews(null)
   }
 
-  const onRefresh = () => { setRefreshing(true); fetchOverview() }
+  // Re-fetch candles when the user changes the duration
+  const changePeriod = (p) => {
+    setPeriod(p)
+    if (selected) fetchCandles(selected, p)
+  }
+
+  const onRefresh = () => { setRefreshing(true); fetchOverview(); if (selected) fetchCandles(selected, period) }
 
   const chartW = screenW - 40
 
@@ -163,14 +194,36 @@ export default function MarketScreen() {
 
         {/* Chart */}
         <View style={styles.chartCard}>
-          <Text style={styles.chartTitle}>3-Month Price</Text>
+          <View style={styles.chartHead}>
+            <Text style={styles.chartTitle}>
+              {selected ? `${selected} · ${PERIOD_LABEL[period]}` : `${PERIOD_LABEL[period]} Candles`}
+            </Text>
+          </View>
+
+          {/* Duration selector */}
+          <View style={styles.periodRow}>
+            {PERIODS.map((p) => (
+              <TouchableOpacity
+                key={p.value}
+                onPress={() => changePeriod(p.value)}
+                style={[styles.periodChip, period === p.value && styles.periodChipActive]}
+              >
+                <Text style={[styles.periodChipText, period === p.value && styles.periodChipTextActive]}>
+                  {p.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </View>
+
           {chartLoading ? (
-            <ActivityIndicator color={COLORS.teal} style={{ height: 160 }} />
+            <ActivityIndicator color={COLORS.teal} style={{ height: 240 }} />
           ) : candles.length > 1 && isLiveMarketSource(candles[0]?.source) ? (
-            <LineChart data={candles} width={chartW} height={180} />
+            <CandleChart data={candles} width={chartW} height={240} />
           ) : (
             <View style={styles.noChart}>
-              <Text style={styles.noChartText}>No live price data</Text>
+              <Text style={styles.noChartText}>
+                {selected ? 'No live price data for this range' : 'Select a ticker below to view its candles'}
+              </Text>
             </View>
           )}
         </View>
@@ -268,7 +321,16 @@ const styles = StyleSheet.create({
   statLabel: { fontSize: 10, color: COLORS.textMuted, marginBottom: 2, textTransform: 'uppercase' },
   statValue: { fontSize: 12, color: COLORS.textSecondary, fontWeight: '500' },
   chartCard: { margin: 20, marginBottom: 8, backgroundColor: COLORS.card, borderRadius: RADIUS.lg, borderWidth: 1, borderColor: COLORS.cardBorder, padding: 16 },
-  chartTitle: { fontSize: 13, color: COLORS.textMuted, marginBottom: 12 },
+  chartHead: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' },
+  chartTitle: { fontSize: 13, color: COLORS.textPrimary, fontWeight: '600' },
+  periodRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 6, marginTop: 10, marginBottom: 12 },
+  periodChip: {
+    paddingHorizontal: 12, paddingVertical: 5, borderRadius: RADIUS.full,
+    borderWidth: 1, borderColor: COLORS.cardBorder, backgroundColor: COLORS.bg,
+  },
+  periodChipActive: { backgroundColor: COLORS.teal, borderColor: COLORS.teal },
+  periodChipText: { fontSize: 12, color: COLORS.textSecondary, fontWeight: '600' },
+  periodChipTextActive: { color: '#fff' },
   noChart: { height: 160, alignItems: 'center', justifyContent: 'center' },
   noChartText: { color: COLORS.textMuted },
   section: { paddingHorizontal: 20, marginTop: 12 },
