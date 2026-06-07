@@ -63,4 +63,61 @@ def login(req: LoginRequest):
 
 @router.get("/me")
 def me(user=Depends(require_auth)):
-    return {"username": user.username, "role": user.role, "email": user.email}
+    created = user.created_at.isoformat() if getattr(user, "created_at", None) else None
+    return {
+        "username": user.username,
+        "role": user.role,
+        "email": user.email,
+        "created_at": created,
+        "is_active": getattr(user, "is_active", True),
+        "alpaca_configured": bool(user.alpaca_api_key and user.alpaca_api_secret),
+    }
+
+
+class AlpacaConfigRequest(BaseModel):
+    api_key: str
+    api_secret: str
+
+
+@router.get("/alpaca-config")
+def get_alpaca_config(user=Depends(require_auth)):
+    """Whether the current user has Alpaca keys set (never returns the secret)."""
+    configured = bool(user.alpaca_api_key and user.alpaca_api_secret)
+    masked = (user.alpaca_api_key[:4] + "…" + user.alpaca_api_key[-4:]) \
+        if configured and len(user.alpaca_api_key or "") >= 8 else None
+    return {"configured": configured, "key_preview": masked}
+
+
+@router.put("/alpaca-config")
+def set_alpaca_config(req: AlpacaConfigRequest, user=Depends(require_auth)):
+    """Save the current user's own Alpaca paper-trading keys."""
+    from app.database import SessionLocal, User
+    if not req.api_key.strip() or not req.api_secret.strip():
+        raise HTTPException(status_code=400, detail="Both API key and secret are required")
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter(User.id == user.id).first()
+        if not u:
+            raise HTTPException(status_code=404, detail="User not found")
+        u.alpaca_api_key = req.api_key.strip()
+        u.alpaca_api_secret = req.api_secret.strip()
+        db.commit()
+        return {"ok": True, "message": "Alpaca keys saved", "configured": True}
+    finally:
+        db.close()
+
+
+@router.delete("/alpaca-config")
+def clear_alpaca_config(user=Depends(require_auth)):
+    """Remove the current user's Alpaca keys."""
+    from app.database import SessionLocal, User
+    db = SessionLocal()
+    try:
+        u = db.query(User).filter(User.id == user.id).first()
+        if u:
+            u.alpaca_api_key = None
+            u.alpaca_api_secret = None
+            db.commit()
+        return {"ok": True, "message": "Alpaca keys removed", "configured": False}
+    finally:
+        db.close()

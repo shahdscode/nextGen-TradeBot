@@ -30,6 +30,9 @@ class User(Base):
     role = Column(String, default="user")  # "admin" | "user"
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Per-user Alpaca paper-trading credentials (each user trades their own account)
+    alpaca_api_key = Column(String, nullable=True)
+    alpaca_api_secret = Column(String, nullable=True)
 
 
 class Job(Base):
@@ -150,6 +153,8 @@ def create_tables():
     Base.metadata.create_all(bind=engine)
     # Migrate existing tables with new columns (SQLite does not support ADD COLUMN IF NOT EXISTS)
     with engine.connect() as conn:
+        _add_column_if_missing(conn, "users", "alpaca_api_key TEXT")
+        _add_column_if_missing(conn, "users", "alpaca_api_secret TEXT")
         _add_column_if_missing(conn, "runs", "model_type TEXT DEFAULT 'rl'")
         _add_column_if_missing(conn, "runs", "published INTEGER DEFAULT 0")
         _add_column_if_missing(conn, "runs", "market TEXT DEFAULT 'us'")

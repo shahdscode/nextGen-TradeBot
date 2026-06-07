@@ -20,28 +20,72 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+import contextvars
+
 _BASE = (settings.alpaca_base_url or "https://paper-api.alpaca.markets").rstrip("/")
+
+# Per-request credentials override. The router sets this from the logged-in
+# user's saved keys so each user trades their OWN Alpaca paper account. When
+# unset (scheduler / web-admin), it falls back to the global .env keys.
+_creds_var: "contextvars.ContextVar" = contextvars.ContextVar("alpaca_creds", default=None)
+
+
+def use_credentials(api_key: str | None, api_secret: str | None) -> None:
+    """Set the Alpaca creds for the current request context (per-user)."""
+    _creds_var.set((api_key, api_secret) if (api_key and api_secret) else None)
+
+
+def _active_creds():
+    c = _creds_var.get()
+    if c and c[0] and c[1]:
+        return c
+    return (settings.alpaca_api_key, settings.alpaca_api_secret)
 
 
 def configured() -> bool:
-    return bool(settings.alpaca_api_key and settings.alpaca_api_secret)
+    k, s = _active_creds()
+    return bool(k and s)
 
 
 def _headers() -> Dict[str, str]:
-    return {
-        "APCA-API-KEY-ID":     settings.alpaca_api_key,
-        "APCA-API-SECRET-KEY": settings.alpaca_api_secret,
-    }
+    k, s = _active_creds()
+    return {"APCA-API-KEY-ID": k, "APCA-API-SECRET-KEY": s}
+
+
+import time as _time
+
+_TIMEOUT = (8, 20)   # (connect, read) seconds
+_RETRIES = 3         # retry transient network blips before failing
+
+
+def _request(method: str, path: str, **kwargs):
+    """HTTP with retries on transient connection/read timeouts (not on 4xx)."""
+    url = f"{_BASE}/v2{path}"
+    last_exc = None
+    for attempt in range(_RETRIES):
+        try:
+            return requests.request(method, url, headers=_headers(), timeout=_TIMEOUT, **kwargs)
+        except (requests.exceptions.ConnectTimeout,
+                requests.exceptions.ReadTimeout,
+                requests.exceptions.ConnectionError) as exc:
+            last_exc = exc
+            if attempt < _RETRIES - 1:
+                _time.sleep(0.8 * (attempt + 1))   # brief backoff, then retry
+            continue
+    raise RuntimeError(
+        "Alpaca is unreachable right now (network timeout after retries). "
+        "Check your connection and try again."
+    ) from last_exc
 
 
 def _get(path: str, **params):
-    r = requests.get(f"{_BASE}/v2{path}", headers=_headers(), params=params or None, timeout=15)
+    r = _request("GET", path, params=params or None)
     r.raise_for_status()
     return r.json()
 
 
 def _post(path: str, payload: dict):
-    r = requests.post(f"{_BASE}/v2{path}", headers=_headers(), json=payload, timeout=15)
+    r = _request("POST", path, json=payload)
     if r.status_code >= 400:
         raise RuntimeError(f"Alpaca {path} → {r.status_code}: {r.text[:200]}")
     return r.json()
@@ -130,8 +174,7 @@ def drawdown_status(max_drawdown_pct: float = DEFAULT_MAX_DRAWDOWN) -> Dict[str,
 def liquidate_all() -> Dict[str, Any]:
     """Close every open position (go to cash). Used by the kill-switch."""
     try:
-        r = requests.delete(f"{_BASE}/v2/positions", headers=_headers(),
-                            params={"cancel_orders": "true"}, timeout=20)
+        r = _request("DELETE", "/positions", params={"cancel_orders": "true"})
         closed = r.json() if r.status_code < 400 else []
         return {"ok": r.status_code < 400, "closed": len(closed) if isinstance(closed, list) else 0}
     except Exception as exc:
@@ -240,7 +283,7 @@ def rebalance_to_weights(target_weights: Dict[str, float],
         # When fully exiting, close the position to avoid leftover fractional dust
         if side == "sell" and target_weights.get(s, 0.0) == 0.0 and s in positions:
             try:
-                requests.delete(f"{_BASE}/v2/positions/{s}", headers=_headers(), timeout=15)
+                _request("DELETE", f"/positions/{s}")
                 orders.append({"symbol": s, "side": "sell", "action": "close_position"})
                 continue
             except Exception:
