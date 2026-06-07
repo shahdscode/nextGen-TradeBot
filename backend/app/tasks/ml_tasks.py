@@ -1,7 +1,10 @@
 import uuid
+import logging
 from datetime import datetime
 from app.celery_app import celery_app
 from app.database import SessionLocal, Run, Job
+
+logger = logging.getLogger(__name__)
 
 
 @celery_app.task(bind=True, name="ml_tasks.train_xgboost")
@@ -91,9 +94,22 @@ def generate_signals_task(self, job_id: str, tickers: list, market: str = "us",
             if data_path.exists():
                 df = pd.read_csv(data_path)
 
+        # When no per-run model paths are supplied, fall back to the POOLED
+        # DEPLOYABLE models (the same ones live Alpaca trading uses). The OOF
+        # training steps never save per-ticker models, so without this every
+        # prediction defaults to neutral 0.5 and gets suppressed.
+        deploy_sigs = {}
+        if not xgb_model_path and not lstm_model_path and market == "us":
+            try:
+                from app.services.fusion_service import deployable_base_signals
+                deploy_sigs = deployable_base_signals(market)
+            except Exception as e:
+                logger.warning("deployable base signals failed: %s", e)
+
         cards = []
         for ticker in tickers:
             try:
+                ds = deploy_sigs.get(ticker)
                 card = generate_full_signal(
                     ticker=ticker,
                     market=market,
@@ -101,6 +117,9 @@ def generate_signals_task(self, job_id: str, tickers: list, market: str = "us",
                     xgb_model_path=xgb_model_path,
                     lstm_model_path=lstm_model_path,
                     ppo_run_id=ppo_run_id,
+                    xgb_prob_override=(ds["xgb"] if ds else None),
+                    lstm_prob_override=(ds["lstm"] if ds else None),
+                    shap_features_override=(ds["shap"] if ds else None),
                 )
                 cards.append(card)
             except Exception as e:
