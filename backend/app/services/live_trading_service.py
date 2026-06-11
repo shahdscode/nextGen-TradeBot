@@ -42,6 +42,15 @@ logger = logging.getLogger(__name__)
 
 # Training universe: DOW30 minus WBA (delisted on Yahoo). Must match step4.
 LIVE_TICKERS = sorted([t for t in DOW_30_TICKER if t != "WBA"])
+# EGX universe: the 21 .CA tickers with reliable Yahoo data (matches step1's
+# features_egx.csv). Used for live EGX signal generation (analysis/signals —
+# no Egyptian broker exposes a retail trading API, so execution stays Alpaca/US).
+EGX_LIVE_TICKERS = [
+    "ABUK.CA", "ACGC.CA", "AMOC.CA", "BTFH.CA", "CLHO.CA", "COMI.CA",
+    "EAST.CA", "EFIH.CA", "EGTS.CA", "ESRS.CA", "ETEL.CA", "FWRY.CA",
+    "GBCO.CA", "HRHO.CA", "ISPH.CA", "MFPC.CA", "OCDI.CA", "ORWE.CA",
+    "PHDC.CA", "SWDY.CA", "TMGH.CA",
+]
 RL_ALGOS = {"ppo", "a2c", "ddpg", "td3", "sac"}
 _LOOKBACK_DAYS = 420   # calendar days; ~280 trading days (252 warmup + buffer)
 
@@ -123,12 +132,15 @@ def _make_env(featured: pd.DataFrame, initial_cash: float):
     return env, tics, stock_dim
 
 
-def _latest_featured() -> tuple:
-    """Download live DOW30 data and build the feature matrix. Returns (featured, latest_date)."""
+def _latest_featured(market: str = "us") -> tuple:
+    """Download live data for the market's universe and build the feature
+    matrix. Returns (featured, latest_date). market: 'us' (DOW30) or 'egx'
+    (.CA tickers — VIX features are zeroed inside build_features for EGX)."""
     end = datetime.utcnow().date()
     start = end - timedelta(days=_LOOKBACK_DAYS)
-    raw = _download_live(LIVE_TICKERS, str(start), str(end))
-    vix = download_vix(str(start), str(end))
+    tickers = EGX_LIVE_TICKERS if market == "egx" else LIVE_TICKERS
+    raw = _download_live(tickers, str(start), str(end))
+    vix = download_vix(str(start), str(end)) if market != "egx" else None
     featured = _build_featured(raw, vix)
     latest_date = pd.to_datetime(featured["date"]).max()
     return featured, latest_date

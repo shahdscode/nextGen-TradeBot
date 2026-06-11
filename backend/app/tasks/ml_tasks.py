@@ -98,8 +98,10 @@ def generate_signals_task(self, job_id: str, tickers: list, market: str = "us",
         # DEPLOYABLE models (the same ones live Alpaca trading uses). The OOF
         # training steps never save per-ticker models, so without this every
         # prediction defaults to neutral 0.5 and gets suppressed.
+        # Works for both markets: the pooled deployable models were trained on
+        # US + EGX rows (50 tickers), and build_features zeroes VIX for .CA names.
         deploy_sigs = {}
-        if not xgb_model_path and not lstm_model_path and market == "us":
+        if not xgb_model_path and not lstm_model_path:
             try:
                 from app.services.fusion_service import deployable_base_signals
                 deploy_sigs = deployable_base_signals(market)

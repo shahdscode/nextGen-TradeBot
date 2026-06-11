@@ -278,7 +278,7 @@ def deployable_base_signals(market: str = "us") -> Dict[str, Dict]:
     if not (deploy / "xgb_deploy.pkl").exists() or not (deploy / "lstm_deploy.pt").exists():
         return {}
 
-    featured, latest_date = _latest_featured()
+    featured, latest_date = _latest_featured(market)
     latest = featured[pd.to_datetime(featured["date"]) == latest_date].copy()
     out: Dict[str, Dict] = {}
 
