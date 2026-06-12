@@ -204,6 +204,45 @@ to the two schemes optimising **different objectives** (5-day-forward direction 
 cross-sectional hit-rate) under near-zero signal — not to exploitable regime alpha. In
 other words, the signal is too weak to pin down a stable "best" model.
 
+### 3.7 Experiment — confidence-threshold sweep (precision vs coverage)
+
+**Question.** Is the meta-learner's confidence score *informative* — i.e. can win rate be
+raised by trading only higher-conviction signals? This is the operational lever behind the
+system's confidence-gated suppression (current cutoff 0.55).
+
+**Design.** The production meta-learner is reproduced exactly (logistic regression,
+time-ordered 70/30 split, scaler fit on train only). On the **validation window only**
+(19,170 rows, 2024-09-04 → 2026-04-09; base up-rate 54.1%), the BUY threshold is swept:
+
+| Threshold | BUY trades | Coverage | **Win rate** | Avg gross 5-day return |
+|----------:|-----------:|---------:|-------------:|-----------------------:|
+| 0.50 | 16,032 | 83.6% | 54.6% | +2.02% |
+| **0.55 (production)** | 5,812 | 30.3% | **56.6%** | +2.21% |
+| 0.60 | 2,534 | 13.2% | 57.6% | +1.82% |
+| 0.65 | 878 | 4.6% | **59.3%** | +2.50% |
+| 0.70 | 251 | 1.3% | **61.0%** | +2.62% |
+| 0.75 | 15 | 0.1% | 73.3%† | +17.2%† |
+
+† 15-trade sample — reported for completeness, too small for inference.
+
+**Findings.**
+
+1. **Win rate rises monotonically with the threshold** (54.6% → 61.0%), reaching
+   **+7 percentage points over the base rate** at 0.70. The meta-learner's confidence is
+   therefore genuinely informative — calibrated conviction, not noise — which directly
+   validates the confidence-gated suppression design.
+2. **The tradeoff is coverage:** at 0.70 the system flags only 1.3% of opportunities
+   (~3 trades/week across 50 tickers). Per-trade quality rises while total opportunity
+   shrinks — a precision/coverage *choice*, not a free improvement.
+3. **Caveats:** returns are gross (no transaction costs) and include market beta from a
+   broadly rising validation window; they measure *selection quality*, not pure alpha.
+
+**Operational implication.** The production cutoff of 0.55 is a reasonable middle of the
+curve; raising it to 0.60–0.65 is a defensible configuration when higher per-trade
+precision is preferred over signal frequency. This is the honest answer to "how to
+improve win rate": trade less, on higher conviction — the curve quantifies exactly what
+that buys.
+
 ---
 
 ## 4. Discussion
