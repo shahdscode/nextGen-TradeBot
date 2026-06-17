@@ -15,6 +15,7 @@ const { ensureBackend } = require('./ensureBackend')
 const { ensureCloudflared } = require('./ensureCloudflared')
 const { mobileRoot, requireToken, writeEnvRemoteMode, restoreLanEnv } = require('./ngrokEnv')
 const { startApiTunnel, probeTunnelUrl, API_PORT } = require('./tunnelLib')
+const { getBestLanIp } = require('./networkUtils')
 
 const SESSION_FILE = path.join(mobileRoot, '.dev-session.json')
 
@@ -113,6 +114,15 @@ function fetchManifest() {
   })
 }
 
+function normalizeExpoUrl(url) {
+  if (!url) return null
+  const lan = getBestLanIp()
+  if (lan && /127\.0\.0\.1|localhost/i.test(url)) {
+    return `exp://${lan}:8081`
+  }
+  return url
+}
+
 async function waitForExpoUrl(maxMs = 120000) {
   const deadline = Date.now() + maxMs
   while (Date.now() < deadline) {
@@ -121,25 +131,32 @@ async function waitForExpoUrl(maxMs = 120000) {
       const host =
         manifest?.extra?.expoClient?.hostUri ||
         manifest?.extra?.expoGo?.debuggerHost
-      if (host) return `exp://${host.replace(/^exp:\/\//, '')}`
+      if (host) {
+        const raw = host.startsWith('exp://') ? host : `exp://${host}`
+        return normalizeExpoUrl(raw)
+      }
     } catch {
       /* Metro still starting */
     }
     await new Promise((r) => setTimeout(r, 2500))
   }
-  return null
+  const lan = getBestLanIp()
+  return lan ? `exp://${lan}:8081` : null
 }
 
 function writeSession(data) {
   fs.writeFileSync(SESSION_FILE, JSON.stringify({ ...data, updatedAt: new Date().toISOString() }, null, 2))
 }
 
-function printBanner(api, expoUrl) {
+function printBanner(api, expoUrl, mode = 'tunnel') {
   console.log('\n╔══════════════════════════════════════════════════════════╗')
   console.log('  PHONE: Open Expo Go → Scan QR below (or Enter URL manually)')
   console.log('╠══════════════════════════════════════════════════════════╣')
   if (expoUrl) {
     console.log(`  Expo URL:  ${expoUrl}`)
+    if (mode === 'lan') {
+      console.log('  Mode:      LAN — phone must be on the SAME Wi‑Fi as this Mac')
+    }
   } else {
     console.log('  Expo URL:  (wait for QR — look for "Tunnel ready" below)')
   }
@@ -147,11 +164,29 @@ function printBanner(api, expoUrl) {
   console.log('  Login:     admin / admin123')
   console.log('  Keep this terminal OPEN while testing.')
   console.log('╠══════════════════════════════════════════════════════════╣')
+  if (mode === 'lan') {
+    console.log('  ngrok Expo tunnel failed — using LAN for Metro bundle.')
+    console.log('  API still uses Cloudflare (works on any network).')
+  }
   console.log('  "Something went wrong" on phone?')
   console.log('    1. Update Expo Go (must support SDK 54)')
   console.log('    2. Expo Go → Profile → Clear cache')
   console.log('    3. Force-quit Expo Go, scan QR again')
   console.log('╚══════════════════════════════════════════════════════════╝\n')
+}
+
+function spawnExpo(env, mode) {
+  const lan = getBestLanIp()
+  if (lan) {
+    env.REACT_NATIVE_PACKAGER_HOSTNAME = lan
+    env.EXPO_PACKAGER_HOSTNAME = lan
+    env.EXPO_DEV_SERVER_LISTEN_ADDRESS = '0.0.0.0'
+  }
+  const args =
+    mode === 'lan'
+      ? ['expo', 'start', '--go', '--lan', '-p', '8081', '--clear']
+      : ['expo', 'start', '--go', '--tunnel', '-p', '8081', '--clear']
+  return spawn('npx', args, { stdio: 'inherit', cwd: mobileRoot, env, shell: false })
 }
 
 function clearExpoCache() {
@@ -208,19 +243,30 @@ async function main() {
   // EXPO_NO_TYPESCRIPT_SETUP avoids extra transforms; tunnel mode for any network.
   env.EXPO_NO_TYPESCRIPT_SETUP = '1'
 
-  const child = spawn(
-    'npx',
-    ['expo', 'start', '--go', '--tunnel', '-p', '8081', '--clear'],
-    { stdio: 'inherit', cwd: mobileRoot, env, shell: false },
-  )
+  let expoMode = 'tunnel'
+  let lanFallbackUsed = false
+  let child = spawnExpo(env, expoMode)
 
   let cleaned = false
   let healthTimer = null
+  let bannerTimer = null
+
+  const scheduleBanner = () => {
+    if (bannerTimer) clearTimeout(bannerTimer)
+    bannerTimer = setTimeout(async () => {
+      const expoUrl = await waitForExpoUrl(30000)
+      writeSession({ apiUrl: api.url, apiKind: api.kind, expoUrl, expoMode })
+      printBanner(api, expoUrl, expoMode)
+    }, 8000)
+  }
+
+  scheduleBanner()
 
   const cleanup = async () => {
     if (cleaned) return
     cleaned = true
     if (healthTimer) clearInterval(healthTimer)
+    if (bannerTimer) clearTimeout(bannerTimer)
     try {
       await api.close()
     } catch {
@@ -234,11 +280,30 @@ async function main() {
     restoreLanEnv()
   }
 
-  setTimeout(async () => {
-    const expoUrl = await waitForExpoUrl()
-    writeSession({ apiUrl: api.url, apiKind: api.kind, expoUrl })
-    printBanner(api, expoUrl)
-  }, 8000)
+  const attachChild = (proc) => {
+    proc.on('exit', async (code) => {
+      if (code !== 0 && !lanFallbackUsed && expoMode === 'tunnel') {
+        lanFallbackUsed = true
+        expoMode = 'lan'
+        freePort(8081)
+        console.error('\n  ⚠ Expo ngrok tunnel failed — falling back to LAN Metro')
+        console.error('  Phone must join the SAME Wi‑Fi. API tunnel stays on Cloudflare.\n')
+        child = spawnExpo(env, 'lan')
+        scheduleBanner()
+        attachChild(child)
+        return
+      }
+      await cleanup()
+      if (code !== 0 && expoMode === 'tunnel') {
+        console.error('\n  Expo tunnel failed. Run: npm run doctor')
+        console.error('  Same Wi‑Fi? Try: npm run start:lan')
+        console.error('  New ngrok token: npm run setup\n')
+      }
+      process.exit(code ?? 0)
+    })
+  }
+
+  attachChild(child)
 
   healthTimer = setInterval(async () => {
     const ok = await probeTunnelUrl(api.url, 1)
@@ -246,15 +311,6 @@ async function main() {
       console.warn('\n  ⚠ API tunnel dropped — press Ctrl+C and run: npm start\n')
     }
   }, 90000)
-
-  child.on('exit', async (code) => {
-    await cleanup()
-    if (code !== 0) {
-      console.error('\n  Expo tunnel failed. Run: npm run doctor')
-      console.error('  New ngrok token: npm run setup\n')
-    }
-    process.exit(code ?? 0)
-  })
 
   process.on('SIGINT', async () => {
     child.kill('SIGINT')
