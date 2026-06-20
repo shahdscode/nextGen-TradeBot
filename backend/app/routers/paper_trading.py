@@ -28,6 +28,10 @@ router = APIRouter(prefix="/paper-trading", tags=["paper-trading"])
 
 MT5_CONFIGURED = bool(settings.mt5_gateway_url)
 
+# ── Risk controls (applied on every rebalance) ───────────────────────────────
+STOP_LOSS_PCT    = 0.08   # per-position: sell & skip a name down more than this
+MAX_DRAWDOWN_PCT = 0.15   # portfolio kill-switch: liquidate above this drawdown
+
 # In-memory cache — populated from DB on first use.
 _SESSION_CACHE: dict[str, Any] = {}
 
@@ -170,6 +174,21 @@ def _fallback_price(symbol: str) -> float:
     return round(50 + (base % 50000) / 100.0, 2)
 
 
+import math
+
+def _finite(x, default: float = 0.0) -> float:
+    """Coerce to a JSON-safe float. NaN/Inf/None → default.
+
+    MT5/Yahoo can return NaN prices, and `NaN or fallback` keeps the NaN
+    (NaN is truthy), which then poisons the JSON response with non-compliant
+    floats. Use this on every price/number that reaches the API."""
+    try:
+        v = float(x)
+    except (TypeError, ValueError):
+        return default
+    return v if math.isfinite(v) else default
+
+
 _EQUITY_PX_CACHE: dict[str, tuple[float, float]] = {}   # symbol -> (price, ts)
 
 def _equity_price(symbol: str) -> float | None:
@@ -189,6 +208,34 @@ def _equity_price(symbol: str) -> float | None:
         return px
     except Exception:
         return None
+
+
+def _current_price(symbol: str, timeframe: str = "1d") -> float:
+    """JSON-safe current price: MT5 gateway → Yahoo (incl. .CA EGX) → fallback."""
+    return (_finite(_latest_price(symbol, timeframe), 0.0)
+            or _finite(_equity_price(symbol), 0.0)
+            or _fallback_price(symbol))
+
+
+def _portfolio_value(s: dict[str, Any]) -> float:
+    """Current cash + market value of held positions."""
+    val = _finite(s.get("cash"), 0.0)
+    for sym, pos in (s.get("positions") or {}).items():
+        val += _finite(pos.get("qty")) * _current_price(sym, s.get("timeframe", "1d"))
+    return round(val, 2)
+
+
+def _stopped_out_positions(s: dict[str, Any]) -> dict[str, float]:
+    """Held names whose unrealized loss breaches STOP_LOSS_PCT → {sym: plpc}."""
+    out: dict[str, float] = {}
+    for sym, pos in (s.get("positions") or {}).items():
+        entry = _finite(pos.get("entry_price"))
+        if entry <= 0:
+            continue
+        plpc = _current_price(sym, s.get("timeframe", "1d")) / entry - 1.0
+        if plpc <= -STOP_LOSS_PCT:
+            out[sym] = round(plpc, 4)
+    return out
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -285,7 +332,7 @@ def get_portfolio():
         if not s["positions"]:
             budget_per_symbol = s["cash"] / max(1, len(s["symbols"]))
             for symbol in s["symbols"]:
-                px = _latest_price(symbol, s["timeframe"])
+                px = _finite(_latest_price(symbol, s["timeframe"]), 0.0) or _finite(_equity_price(symbol), 0.0)
                 if not px or px <= 0:
                     px = _fallback_price(symbol)
                 qty = round(budget_per_symbol / px, 6)
@@ -304,11 +351,13 @@ def get_portfolio():
         total_market_val = 0.0
 
         for symbol, pos in s["positions"].items():
-            qty     = float(pos["qty"])
-            entry   = float(pos["entry_price"])
-            # Price priority: MT5 gateway → Yahoo equity → deterministic fallback
-            current = (_latest_price(symbol, s["timeframe"])
-                       or _equity_price(symbol)
+            qty     = _finite(pos.get("qty"))
+            entry   = _finite(pos.get("entry_price"))
+            # Price priority: MT5 gateway → Yahoo equity → deterministic fallback.
+            # _finite() guards against NaN (which is truthy and would short-circuit
+            # the `or` chain) before falling through to the next source.
+            current = (_finite(_latest_price(symbol, s["timeframe"]), 0.0)
+                       or _finite(_equity_price(symbol), 0.0)
                        or _fallback_price(symbol))
             mktval  = qty * current
             cost    = qty * entry
@@ -346,28 +395,57 @@ def get_portfolio():
 
 @router.post("/rebalance")
 def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
-              mode: str = "rl"):
+              mode: str = "rl", market: str = "us", tickers: str | None = None):
     """
-    Model-driven trade decision on LIVE DOW30 data.
+    Model-driven trade decision on LIVE data, into the simulated paper account.
 
-    mode="rl"   : run one trained RL model (pass run_id), use its live holdings.
-    mode="meta" : full 7-model meta-learner ensemble (run_id ignored) — assembles
-                  xgb + lstm + 5 RL signals + regime + VIX per stock, runs the
-                  meta-learner, allocates ∝ meta probability among BUY stocks.
+    market  : "us" (DOW30) or "egx" (.CA names). EGX is simulation-only.
+    tickers : optional CSV subset to trade (must belong to the market).
+    mode="rl"   : one trained RL model (US only — RL is dimension-locked to DOW30).
+    mode="meta" : meta-learner ensemble (works for US and EGX; EGX uses XGB+LSTM).
 
-    Rebalances the paper account to the model's target. No MT5 required
-    (US equities use the Yahoo feed).
+    Risk controls applied every rebalance:
+      • Kill-switch — if portfolio drawdown > 15%, liquidate to cash and stop.
+      • Stop-loss   — any held name down > 8% is sold and skipped this cycle.
+      • Market decline — if the regime is BEAR the model goes to cash (no new buys).
     """
     from app.services.live_trading_service import generate_live_allocation, generate_meta_allocation
 
     global _SESSION_CACHE
     s = _get_session()
     cash = float(s.get("initial_cash") or initial_cash)
+    market = (market or "us").lower()
+    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()] if tickers else None
 
+    # ── Risk 1: drawdown kill-switch (before any new allocation) ──────────────
+    if s.get("positions"):
+        cur_val = _portfolio_value(s)
+        drawdown = (cur_val / cash - 1.0) if cash > 0 else 0.0
+        if drawdown <= -MAX_DRAWDOWN_PCT:
+            s.update({"positions": {}, "cash": cur_val, "running": True,
+                      "initial_cash": cash})
+            s.setdefault("session_id", str(uuid.uuid4()))
+            _SESSION_CACHE = s
+            _save_session(s)
+            return {
+                "ok": True, "risk_action": "KILL_SWITCH",
+                "drawdown": round(drawdown, 4), "threshold": -MAX_DRAWDOWN_PCT,
+                "message": f"Drawdown {drawdown*100:.1f}% breached -{MAX_DRAWDOWN_PCT*100:.0f}% "
+                           f"— liquidated all positions to cash.",
+                "positions_held": 0, "cash": s["cash"], "session_id": s["session_id"],
+            }
+
+    # ── Risk 2: per-position stop-loss (names down > 8% are sold & skipped) ────
+    stopped_out = _stopped_out_positions(s)
+
+    # ── Model allocation ──────────────────────────────────────────────────────
     if mode == "meta":
         rid = "meta_learner"
-        alloc = generate_meta_allocation(cash)
+        alloc = generate_meta_allocation(cash, market=market, tickers=ticker_list)
     else:
+        if market != "us":
+            raise HTTPException(status_code=400,
+                                detail="RL models are US-only — use mode='meta' for EGX.")
         rid = run_id or s.get("run_id")
         if not rid:
             raise HTTPException(status_code=400,
@@ -377,9 +455,11 @@ def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
     if not alloc.get("ok"):
         raise HTTPException(status_code=400, detail=alloc.get("message", "allocation failed"))
 
-    # Rebalance paper positions to the model's target holdings
+    # ── Rebalance to target, excluding stopped-out names this cycle ───────────
     positions, invested = {}, 0.0
     for tic, qty in alloc["target"].items():
+        if tic in stopped_out:
+            continue   # honor stop-loss: don't re-enter a name we just stopped out of
         if qty and qty > 0:
             px = float(alloc["prices"].get(tic, 0.0))
             if px <= 0:
@@ -405,12 +485,16 @@ def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
         "ok":             True,
         "as_of":          alloc["as_of"],
         "algorithm":      alloc["algorithm"],
+        "market":         market,
+        "regime":         alloc.get("regime"),
+        "defensive":      alloc.get("defensive", False),
         "message":        alloc["message"],
         "run_id":         rid,
         "session_id":     s["session_id"],
         "positions_held": len(positions),
         "invested":       round(invested, 2),
         "cash":           s["cash"],
+        "stopped_out":    stopped_out,
         "signals":        alloc["signals"],
     }
 
@@ -474,6 +558,16 @@ def alpaca_rebalance(run_id: str | None = None, mode: str = "rl", user=Depends(r
         raise HTTPException(status_code=400,
                             detail="Alpaca not configured — set keys in .env")
 
+    # ── Risk 1: drawdown kill-switch — liquidate & stop if breached ───────────
+    try:
+        risk = alpaca_service.enforce_risk(MAX_DRAWDOWN_PCT)
+        if risk.get("liquidated"):
+            return {"ok": True, "broker": "alpaca_paper", "risk_action": "KILL_SWITCH",
+                    "message": f"Drawdown breached -{MAX_DRAWDOWN_PCT*100:.0f}% "
+                               f"— liquidated all positions.", **risk}
+    except Exception:
+        pass
+
     s = _get_session()
     equity = None
     try:
@@ -483,7 +577,7 @@ def alpaca_rebalance(run_id: str | None = None, mode: str = "rl", user=Depends(r
     budget = equity or float(s.get("initial_cash") or 100_000.0)
 
     if mode == "meta":
-        alloc = generate_meta_allocation(budget)
+        alloc = generate_meta_allocation(budget, market="us")
         rid = "meta_learner"
     else:
         rid = run_id or s.get("run_id")
@@ -493,9 +587,20 @@ def alpaca_rebalance(run_id: str | None = None, mode: str = "rl", user=Depends(r
     if not alloc.get("ok"):
         raise HTTPException(status_code=400, detail=alloc.get("message", "allocation failed"))
 
+    # ── Risk 2: stop-loss — drop names already down > 8% from the target ──────
+    # (weight→0 makes rebalance_to_weights close the position.)
+    stopped_out = {}
+    try:
+        for p in alpaca_service.get_positions():
+            plpc = _finite(p.get("unrealized_plpc"))
+            if plpc <= -STOP_LOSS_PCT:
+                stopped_out[p.get("symbol")] = round(plpc, 4)
+    except Exception:
+        pass
+
     # Convert model target (shares × price) → portfolio weights
     target_val = {t: alloc["target"].get(t, 0.0) * alloc["prices"].get(t, 0.0)
-                  for t in alloc["tickers"]}
+                  for t in alloc["tickers"] if t not in stopped_out}
     total = sum(v for v in target_val.values() if v > 0)
     weights = {t: (v / total) for t, v in target_val.items() if v > 0} if total > 0 else {}
 
@@ -512,6 +617,8 @@ def alpaca_rebalance(run_id: str | None = None, mode: str = "rl", user=Depends(r
     return {
         "ok": True, "broker": "alpaca_paper", "mode": mode, "run_id": rid,
         "as_of": alloc.get("as_of"), "model_message": alloc.get("message"),
+        "regime": alloc.get("regime"), "defensive": alloc.get("defensive", False),
+        "stopped_out": stopped_out,
         "weights": {t: round(w, 4) for t, w in weights.items()},
         **result,
     }

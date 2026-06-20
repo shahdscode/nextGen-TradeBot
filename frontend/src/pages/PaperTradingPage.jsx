@@ -15,13 +15,35 @@ export default function PaperTradingPage() {
   const [alpacaMode, setAlpacaMode] = useState('rl')
   const [alpacaResult, setAlpacaResult] = useState(null)
 
+  // ── Simulated session (US + EGX, with market/ticker picker) ───────────────
+  const [simMarket, setSimMarket] = useState('us')
+  const [simTickers, setSimTickers] = useState('')   // optional CSV subset
+  const [simResult, setSimResult] = useState(null)
+  const [simPf, setSimPf] = useState(null)
+
+  const refreshSim = () =>
+    client.get('/api/paper-trading/portfolio').then(r => setSimPf(r.data)).catch(() => {})
+
+  const handleSimRebalance = async () => {
+    setBusy(true); setSimResult(null)
+    try {
+      const params = { mode: 'meta', market: simMarket }
+      if (simTickers.trim()) params.tickers = simTickers.trim()
+      const r = await client.post('/api/paper-trading/rebalance', null, { params })
+      setSimResult(r.data)
+      await refreshSim()
+    } catch (e) {
+      setSimResult({ ok: false, note: e.response?.data?.detail || 'Rebalance failed' })
+    } finally { setBusy(false) }
+  }
+
   const refreshAlpaca = () => Promise.all([
     client.get('/api/paper-trading/alpaca/status').then(r => setAlpaca(r.data)).catch(() => {}),
     client.get('/api/paper-trading/alpaca/portfolio').then(r => setAlpacaPf(r.data)).catch(() => {}),
   ])
 
   useEffect(() => {
-    refreshAlpaca().finally(() => setLoading(false))
+    Promise.all([refreshAlpaca(), refreshSim()]).finally(() => setLoading(false))
     // RL runs power the "single model" rebalance mode
     client.get('/api/train/runs').then(r => {
       const rl = r.data.filter(x => ['ppo','a2c','ddpg','td3','sac'].includes(x.algorithm)
@@ -52,7 +74,77 @@ export default function PaperTradingPage() {
   return (
     <div>
       <h1 className="text-2xl font-semibold text-gray-900 mb-1">Paper Trading</h1>
-      <p className="text-sm text-gray-500 mb-6">Model-driven live paper trading on DOW 30 via Alpaca</p>
+      <p className="text-sm text-gray-500 mb-6">US (DOW 30) via Alpaca real fills · Egyptian market (EGX) via simulated session</p>
+
+      {/* Simulated session — market + ticker picker (US & EGX) */}
+      <div className="bg-white border border-indigo-200 rounded-xl p-6 mb-6 max-w-3xl">
+        <div className="flex items-center gap-2 mb-1">
+          <h2 className="text-sm font-semibold text-gray-900">Simulated Session — pick market &amp; tickers</h2>
+          {simResult?.regime && (
+            <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
+              simResult.defensive ? 'bg-red-100 text-red-700' : 'bg-gray-100 text-gray-600'}`}>
+              {simResult.regime}{simResult.defensive ? ' · defensive (no new buys)' : ''}
+            </span>
+          )}
+        </div>
+        <p className="text-xs text-gray-500 mb-4">
+          Meta-learner allocation on live data into a simulated account. Risk controls run every
+          rebalance: sell any name down &gt; 8%, go to cash in a BEAR regime, liquidate on &gt; 15% drawdown.
+          EGX uses XGBoost + LSTM (RL is US-only).
+        </p>
+        <div className="flex flex-wrap items-center gap-2 mb-3">
+          <select value={simMarket} onChange={e => setSimMarket(e.target.value)}
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+            <option value="us">US — DOW 30</option>
+            <option value="egx">Egypt — EGX</option>
+          </select>
+          <input value={simTickers} onChange={e => setSimTickers(e.target.value)}
+            placeholder={simMarket === 'egx' ? 'COMI.CA, HRHO.CA (optional)' : 'AAPL, MSFT (optional)'}
+            className="border border-gray-300 rounded-lg px-3 py-2 text-sm flex-1 min-w-[180px]" />
+          <button onClick={handleSimRebalance} disabled={busy}
+            className="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50">
+            {busy ? 'Running…' : 'Rebalance'}
+          </button>
+        </div>
+        {simResult && (
+          <div className={`text-xs rounded-lg p-3 mb-2 ${simResult.ok ? 'bg-indigo-50 text-indigo-800' : 'bg-red-50 text-red-700'}`}>
+            {simResult.ok ? (
+              simResult.risk_action === 'KILL_SWITCH'
+                ? `⚠ Kill-switch: ${simResult.message}`
+                : `✓ ${simResult.message} · ${simResult.positions_held} positions · $${Number(simResult.cash).toLocaleString()} cash`
+            ) : `✗ ${simResult.note}`}
+          </div>
+        )}
+        {simResult?.stopped_out && Object.keys(simResult.stopped_out).length > 0 && (
+          <div className="text-[11px] text-red-600 mb-2">
+            Stopped out (down &gt; 8%): {Object.entries(simResult.stopped_out)
+              .map(([t, pl]) => `${t} ${(pl * 100).toFixed(1)}%`).join(', ')}
+          </div>
+        )}
+        {simPf?.positions?.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-xs">
+              <thead><tr className="border-b border-gray-100 text-gray-400">
+                <th className="text-left py-1">Symbol</th><th className="text-right">Qty</th>
+                <th className="text-right">Price</th><th className="text-right">Mkt Val</th><th className="text-right">P&L</th>
+              </tr></thead>
+              <tbody>
+                {simPf.positions.map(p => (
+                  <tr key={p.symbol} className="border-b border-gray-50">
+                    <td className="py-1 font-medium">{p.symbol}</td>
+                    <td className="text-right">{p.qty.toFixed(2)}</td>
+                    <td className="text-right">${p.current_price.toFixed(2)}</td>
+                    <td className="text-right">${p.market_value.toFixed(0)}</td>
+                    <td className={`text-right ${p.unrealized_pl >= 0 ? 'text-green-600' : 'text-red-500'}`}>
+                      ${p.unrealized_pl.toFixed(2)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       {/* Alpaca paper broker — real US-equity fills */}
       <div className="bg-white border border-emerald-200 rounded-xl p-6 mb-6 max-w-3xl">
