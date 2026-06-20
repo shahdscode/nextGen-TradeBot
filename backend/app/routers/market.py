@@ -99,11 +99,11 @@ def get_quote(ticker: str, market: str = Query("us")):
     live = _yf_quote(ticker)
     if live:
         live["source"] = "live"
-        return live
+        return _json_safe(live)
 
     fallback = _quote_fallback(ticker)
     if fallback:
-        return fallback
+        return _json_safe(fallback)
 
     raise HTTPException(
         status_code=503,
@@ -117,13 +117,13 @@ def get_candles(ticker: str, period: str = Query("3mo"), interval: str = Query("
     try:
         live = _yf_candles(ticker, period, interval)
         if live:
-            return _tag_source(live, "live")
+            return _json_safe(_tag_source(live, "live"))
     except Exception as exc:
         logger.warning("candles live path failed for %s: %s", ticker, exc)
 
     fallback = _candles_fallback(ticker, period, interval)
     if fallback:
-        return fallback
+        return _json_safe(fallback)
 
     raise HTTPException(
         status_code=503,
@@ -141,6 +141,20 @@ def get_news_sentiment(ticker: str):
 def get_regime(market: str = Query("us")):
     from app.services.regime_service import get_regime_info
     return get_regime_info(market)
+
+
+def _json_safe(obj):
+    """Recursively replace NaN/Inf floats with None so the response is valid
+    JSON. yfinance `.info` (pe_ratio, marketCap, 52w_*) and gap rows in OHLC
+    data can contain NaN, which crashes the default JSON encoder."""
+    import math
+    if isinstance(obj, float):
+        return obj if math.isfinite(obj) else None
+    if isinstance(obj, dict):
+        return {k: _json_safe(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_json_safe(v) for v in obj]
+    return obj
 
 
 def _direction(change_pct: float) -> str:
