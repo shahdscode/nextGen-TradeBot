@@ -14,6 +14,7 @@ from app.models.schemas import RunResponse
 from app.tasks.ml_tasks import train_xgboost_task, train_lstm_task, generate_signals_task
 from app.tasks.meta_tasks import collect_oof_task, train_meta_learner_task, calibrate_model_task
 from app.services.regime_service import get_regime_info, train_regime_model
+from app.services.auth_service import require_admin
 from app.config import settings
 
 router = APIRouter(prefix="/ml", tags=["ml"])
@@ -43,7 +44,7 @@ class SignalGenerateRequest(BaseModel):
 
 
 @router.post("/train/xgboost", response_model=RunResponse)
-def train_xgboost(req: XGBTrainRequest):
+def train_xgboost(req: XGBTrainRequest, _admin=Depends(require_admin)):
     run_id = str(uuid.uuid4())
     db = SessionLocal()
     try:
@@ -67,7 +68,7 @@ def train_xgboost(req: XGBTrainRequest):
 
 
 @router.post("/train/lstm", response_model=RunResponse)
-def train_lstm(req: LSTMTrainRequest):
+def train_lstm(req: LSTMTrainRequest, _admin=Depends(require_admin)):
     run_id = str(uuid.uuid4())
     db = SessionLocal()
     try:
@@ -91,7 +92,7 @@ def train_lstm(req: LSTMTrainRequest):
 
 
 @router.post("/train/regime")
-def train_regime(market: str = "us"):
+def train_regime(market: str = "us", _admin=Depends(require_admin)):
     result = train_regime_model(market=market)
     return result
 
@@ -102,7 +103,7 @@ def get_regime(market: str = "us"):
 
 
 @router.post("/signals/generate")
-def generate_signals(req: SignalGenerateRequest):
+def generate_signals(req: SignalGenerateRequest, _admin=Depends(require_admin)):
     job_id = str(uuid.uuid4())
     db = SessionLocal()
     try:
@@ -148,7 +149,7 @@ class CalibrateRequest(BaseModel):
 
 
 @router.post("/oof/collect")
-def collect_oof(req: OOFCollectRequest):
+def collect_oof(req: OOFCollectRequest, _admin=Depends(require_admin)):
     """
     Trigger out-of-fold prediction collection for all trained base models.
     Dispatches a Celery task; returns job_id immediately.
@@ -185,7 +186,7 @@ def collect_oof(req: OOFCollectRequest):
 
 
 @router.post("/train/meta-learner")
-def train_meta_learner_endpoint(req: MetaLearnerTrainRequest):
+def train_meta_learner_endpoint(req: MetaLearnerTrainRequest, _admin=Depends(require_admin)):
     """
     Train the stacking meta-learner on collected OOF predictions.
     Returns run_id; actual training happens in Celery.
@@ -220,7 +221,7 @@ def train_meta_learner_endpoint(req: MetaLearnerTrainRequest):
 
 
 @router.post("/calibrate/{run_id}")
-def calibrate_model(run_id: str):
+def calibrate_model(run_id: str, _admin=Depends(require_admin)):
     """
     Apply Platt scaling calibration to a trained XGBoost or LSTM model.
     Returns immediately; calibration runs asynchronously.
