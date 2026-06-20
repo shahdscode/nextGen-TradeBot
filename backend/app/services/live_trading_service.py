@@ -42,6 +42,15 @@ logger = logging.getLogger(__name__)
 
 # Training universe: DOW30 minus WBA (delisted on Yahoo). Must match step4.
 LIVE_TICKERS = sorted([t for t in DOW_30_TICKER if t != "WBA"])
+# EGX universe: the 21 .CA tickers with reliable Yahoo data (matches step1's
+# features_egx.csv). Used for live EGX signal generation (analysis/signals —
+# no Egyptian broker exposes a retail trading API, so execution stays Alpaca/US).
+EGX_LIVE_TICKERS = [
+    "ABUK.CA", "ACGC.CA", "AMOC.CA", "BTFH.CA", "CLHO.CA", "COMI.CA",
+    "EAST.CA", "EFIH.CA", "EGTS.CA", "ESRS.CA", "ETEL.CA", "FWRY.CA",
+    "GBCO.CA", "HRHO.CA", "ISPH.CA", "MFPC.CA", "OCDI.CA", "ORWE.CA",
+    "PHDC.CA", "SWDY.CA", "TMGH.CA",
+]
 RL_ALGOS = {"ppo", "a2c", "ddpg", "td3", "sac"}
 _LOOKBACK_DAYS = 420   # calendar days; ~280 trading days (252 warmup + buffer)
 
@@ -123,15 +132,35 @@ def _make_env(featured: pd.DataFrame, initial_cash: float):
     return env, tics, stock_dim
 
 
-def _latest_featured() -> tuple:
-    """Download live DOW30 data and build the feature matrix. Returns (featured, latest_date)."""
+def _latest_featured(market: str = "us") -> tuple:
+    """Download live data for the market's universe and build the feature
+    matrix. Returns (featured, latest_date). market: 'us' (DOW30) or 'egx'
+    (.CA tickers — VIX features are zeroed inside build_features for EGX)."""
     end = datetime.utcnow().date()
     start = end - timedelta(days=_LOOKBACK_DAYS)
-    raw = _download_live(LIVE_TICKERS, str(start), str(end))
-    vix = download_vix(str(start), str(end))
-    featured = _build_featured(raw, vix)
-    latest_date = pd.to_datetime(featured["date"]).max()
-    return featured, latest_date
+    tickers = EGX_LIVE_TICKERS if market == "egx" else LIVE_TICKERS
+    try:
+        raw = _download_live(tickers, str(start), str(end))
+        vix = download_vix(str(start), str(end)) if market != "egx" else None
+        featured = _build_featured(raw, vix)
+        latest_date = pd.to_datetime(featured["date"]).max()
+        return featured, latest_date
+    except Exception as exc:
+        # Yahoo can intermittently return nothing (esp. .CA / EGX tickers).
+        # Fall back to the cached feature matrix built by step1 so signal
+        # generation degrades to "last known data" instead of failing outright.
+        cached = Path(settings.oof_dir) / ("features_egx.csv" if market == "egx" else "features_us.csv")
+        if not cached.exists():
+            raise
+        logger.warning("_latest_featured(%s): live download failed (%s) — "
+                       "falling back to cached %s", market, exc, cached.name)
+        df = pd.read_csv(cached)
+        df["date"] = pd.to_datetime(df["date"])
+        for col in FEATURE_COLUMNS:
+            if col not in df.columns:
+                df[col] = 0.0
+        latest_date = df["date"].max()
+        return df, latest_date
 
 
 def _rl_holdings(featured: pd.DataFrame, algo: str, model_path: str,
@@ -156,19 +185,31 @@ def _rl_holdings(featured: pd.DataFrame, algo: str, model_path: str,
     return {t: float(holdings[i]) for i, t in enumerate(tics)}
 
 
-def generate_meta_allocation(initial_cash: float = 100_000.0) -> Dict[str, Any]:
+def generate_meta_allocation(initial_cash: float = 100_000.0,
+                             market: str = "us",
+                             tickers: Optional[List[str]] = None) -> Dict[str, Any]:
     """
-    Full 7-model meta-learner allocation on live DOW30 data.
+    Full meta-learner allocation on live data for a market (US or EGX).
 
     Assembles xgb + lstm + 5 RL signals + regime + VIX per stock, runs the
     trained meta-learner per stock → probability, and allocates capital
     proportional to the meta probability among BUY stocks (prob > 0.5).
-    Requires deployable base models (scripts/train_deployable_models.py) and
-    meta_learner.pkl (Step 5).
+
+    market : "us" (DOW30, RL ensemble + Alpaca-tradable) or "egx" (.CA names —
+             RL is US-dimension-locked so EGX uses XGB+LSTM only, RL neutral).
+    tickers: optional subset to restrict the universe (must belong to the market).
+
+    Risk: if the market regime is BEAR, the allocation goes DEFENSIVE — it holds
+    no new positions (targets cash) so the caller stops opening exposure. The
+    per-position stop-loss and drawdown kill-switch are applied by the caller
+    (paper-trading rebalance) since they depend on the live portfolio.
+
+    Requires deployable base models and meta_learner.pkl.
     """
     import pickle
     from app.services.meta_learner_service import predict_meta_learner
 
+    market = (market or "us").lower()
     deploy = Path(settings.models_dir) / "deploy"
     meta_path = str(Path(settings.models_dir) / "meta_learner.pkl")
     if not (deploy / "xgb_deploy.pkl").exists() or not (deploy / "lstm_deploy.pt").exists():
@@ -179,9 +220,16 @@ def generate_meta_allocation(initial_cash: float = 100_000.0) -> Dict[str, Any]:
         return {"ok": False, "message": "FinRL not available"}
 
     try:
-        featured, latest_date = _latest_featured()
+        featured, latest_date = _latest_featured(market)
         latest = featured[pd.to_datetime(featured["date"]) == latest_date].copy()
         tics = sorted(latest["tic"].unique())
+        if tickers:
+            want = {t.upper() for t in tickers}
+            tics = [t for t in tics if t.upper() in want]
+            if not tics:
+                return {"ok": False,
+                        "message": f"None of the requested tickers are in the {market.upper()} universe"}
+            latest = latest[latest["tic"].isin(tics)].copy()
 
         # ── XGBoost (pooled deployable) ───────────────────────────────────────
         with open(deploy / "xgb_deploy.pkl", "rb") as f:
@@ -215,21 +263,28 @@ def generate_meta_allocation(initial_cash: float = 100_000.0) -> Dict[str, Any]:
                 lstm_sig[tic] = float(lstm_model(torch.tensor(seq).unsqueeze(0)).item())
 
         # ── 5 RL models (ckpt3) → per-stock signal from holdings ─────────────
-        db = SessionLocal()
-        rl_runs = {}
-        for a in ["ppo", "a2c", "ddpg", "td3", "sac"]:
-            r = (db.query(Run).filter(Run.algorithm == a, Run.data_job_id == "step4_ckpt3").first()
-                 or db.query(Run).filter(Run.algorithm == a).first())
-            if r:
-                rl_runs[a] = r.model_path
-        db.close()
+        # RL policies are dimension-locked to the US DOW30 universe they trained
+        # on, so they only run for US. For EGX the RL signals stay neutral (0.5)
+        # and the meta-learner leans on XGBoost + LSTM.
         rl_sig = {a: {} for a in ["ppo", "a2c", "ddpg", "td3", "sac"]}
-        for a, mp in rl_runs.items():
-            if mp and Path(str(mp) + ".zip").exists():
-                holds = _rl_holdings(featured, a, mp, initial_cash)
-                mx = max(holds.values()) if holds else 0
-                for t in tics:
-                    rl_sig[a][t] = 0.5 + 0.5 * (holds.get(t, 0) / mx) if mx > 0 else 0.5
+        if market == "us":
+            db = SessionLocal()
+            rl_runs = {}
+            for a in ["ppo", "a2c", "ddpg", "td3", "sac"]:
+                r = (db.query(Run).filter(Run.algorithm == a, Run.data_job_id == "step4_ckpt3").first()
+                     or db.query(Run).filter(Run.algorithm == a).first())
+                if r:
+                    rl_runs[a] = r.model_path
+            db.close()
+            for a, mp in rl_runs.items():
+                if mp and Path(str(mp) + ".zip").exists():
+                    holds = _rl_holdings(featured, a, mp, initial_cash)
+                    mx = max(holds.values()) if holds else 0
+                    for t in tics:
+                        rl_sig[a][t] = 0.5 + 0.5 * (holds.get(t, 0) / mx) if mx > 0 else 0.5
+        for a in rl_sig:
+            for t in tics:
+                rl_sig[a].setdefault(t, 0.5)
 
         # ── Regime + VIX ─────────────────────────────────────────────────────
         mkt_mom = featured.groupby("date")["price_mom_20"].mean()
@@ -251,9 +306,13 @@ def generate_meta_allocation(initial_cash: float = 100_000.0) -> Dict[str, Any]:
             }
             meta_prob[t] = float(predict_meta_learner(meta_path, fdict)["probability"])
 
+        # ── Market-decline guardrail: BEAR regime → go defensive (no new buys) ─
+        regime_label = "BEAR" if regime_bear else ("BULL" if regime_bull else "SIDEWAYS")
+        defensive = bool(regime_bear)
+
         # ── Allocate ∝ meta probability among BUY stocks (prob > 0.5) ────────
         latest_close = dict(zip(latest["tic"], latest["close"].astype(float)))
-        buys = {t: p for t, p in meta_prob.items() if p > 0.5}
+        buys = {} if defensive else {t: p for t, p in meta_prob.items() if p > 0.5}
         wsum = sum(buys.values())
         target, prices, signals = {}, {}, {}
         for t in tics:
@@ -265,14 +324,18 @@ def generate_meta_allocation(initial_cash: float = 100_000.0) -> Dict[str, Any]:
                 signals[t] = "BUY"
             else:
                 target[t] = 0.0
-                signals[t] = "SELL" if meta_prob[t] < 0.45 else "HOLD"
+                signals[t] = "SELL" if (defensive or meta_prob[t] < 0.45) else "HOLD"
 
+        msg = (f"BEAR regime — defensive: holding cash on {len(tics)} {market.upper()} names "
+               f"as of {latest_date.date()}") if defensive else \
+              f"Meta-learner holds {len(buys)}/{len(tics)} {market.upper()} stocks as of {latest_date.date()}"
         return {
             "ok": True, "as_of": str(latest_date.date()), "tickers": tics,
             "target": target, "prices": prices, "signals": signals,
             "meta_prob": {t: round(p, 4) for t, p in meta_prob.items()},
-            "algorithm": "meta_learner",
-            "message": f"Meta-learner holds {len(buys)}/{len(tics)} stocks as of {latest_date.date()}",
+            "algorithm": "meta_learner", "market": market,
+            "regime": regime_label, "defensive": defensive,
+            "message": msg,
         }
     except Exception as exc:
         logger.exception("generate_meta_allocation failed")

@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import client from '../api/client'
-import EquityCurveChart from '../components/equityCurveChart'
-import MetricsCard from '../components/metricsCard'
-import { ChartSkeleton, CardSkeleton } from '../components/skeleton'
+import EquityCurveChart from '../components/EquityCurveChart'
+import MetricsCard from '../components/MetricsCard'
+import { ChartSkeleton, CardSkeleton } from '../components/Skeleton'
 
 const FMT = (v) => v != null ? `$${Number(v).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : '—'
 

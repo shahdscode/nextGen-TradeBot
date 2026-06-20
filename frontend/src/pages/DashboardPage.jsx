@@ -1,8 +1,8 @@
 import { useState, useEffect, useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import client from '../api/client'
-import JobStatusBadge from '../components/jobStatusBadge'
-import { TableSkeleton } from '../components/skeleton'
+import JobStatusBadge from '../components/JobStatusBadge'
+import { TableSkeleton } from '../components/Skeleton'
 
 const ALGORITHMS = ['All', 'ppo', 'a2c', 'ddpg', 'td3', 'sac', 'xgboost', 'lstm']
 const STATUSES   = ['All', 'done', 'running', 'pending', 'error']

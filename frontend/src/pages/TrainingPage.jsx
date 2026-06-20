@@ -2,9 +2,9 @@ import { useState, useEffect } from 'react'
 import { Link } from 'react-router-dom'
 import toast from 'react-hot-toast'
 import client from '../api/client'
-import JobStatusBadge from '../components/jobStatusBadge'
-import RewardCurveChart from '../components/rewardCurveChart'
-import { ChartSkeleton } from '../components/skeleton'
+import JobStatusBadge from '../components/JobStatusBadge'
+import RewardCurveChart from '../components/RewardCurveChart'
+import { ChartSkeleton } from '../components/Skeleton'
 
 export default function TrainingPage() {
   const [agents, setAgents] = useState({})

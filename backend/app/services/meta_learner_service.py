@@ -34,9 +34,16 @@ META_LEARNER_FEATURES = [
     "sac_signal",
     "regime_bull",
     "regime_bear",
-    "sentiment_score",
     "vix_zscore",
 ]
+# NOTE: "sentiment_score" was removed from the meta-learner inputs. The wired
+# news sources (Google News RSS / NewsAPI) are recent-only, so no historical
+# per-day sentiment exists for the OOF training window — the column was a
+# constant 0.0, contributing nothing and risking train/serve skew if live
+# inference passed real values. Live signal cards still show real *current*
+# sentiment via fusion_service; it is just not a meta-learner training input.
+# Re-add here (and backfill the OOF sentiment series) if a historical news
+# source is ever added.
 
 
 def train_meta_learner(
@@ -195,7 +202,20 @@ def predict_meta_learner(
         x = np.array([[feature_dict.get(f, 0.0) for f in feat_list]], dtype=np.float32)
         x_s = scaler.transform(x)
 
-        prob = float(model.predict_proba(x_s)[0, 1])
+        raw_prob = float(model.predict_proba(x_s)[0, 1])
+
+        # Apply Platt calibration if a fitted calibrator exists, so the served
+        # probability matches the calibrated confidence reported in evaluation.
+        prob, calibrated = raw_prob, False
+        try:
+            from app.config import settings
+            cal_path = os.path.join(settings.models_dir, "calibrator.pkl")
+            if os.path.exists(cal_path):
+                from app.services.calibration_service import calibrate_score
+                prob = float(calibrate_score(raw_prob, cal_path))
+                calibrated = True
+        except Exception as exc:
+            logger.debug("calibration skipped: %s", exc)
 
         # Per-feature contribution (coef × scaled_value)
         coef = model.coef_[0]
@@ -206,6 +226,8 @@ def predict_meta_learner(
 
         return {
             "probability":           round(prob, 4),
+            "raw_probability":       round(raw_prob, 4),
+            "calibrated":            calibrated,
             "signal":                round(prob, 4),
             "method":                "meta_learner",
             "feature_contributions": contributions,
@@ -216,12 +238,14 @@ def predict_meta_learner(
         return {"probability": 0.5, "signal": 0.5, "method": "fallback_error"}
 
 
-def get_learned_weights(model_path: str) -> Dict[str, float]:
+def get_learned_weights(model_path: str) -> Dict[str, Any]:
     """
-    Return model coefficients as normalised weights that sum to 1.
+    Return the meta-learner's coefficients as normalised importances.
 
-    Only includes the 7 base model signals (not regime/sentiment/vix).
-    Used for display in the admin UI to show which models are trusted most.
+    Reports ALL features the model actually uses (base-model signals plus
+    regime/vix context) so the admin view reflects the true picture — the
+    regime features in particular often dominate. Returns both a combined
+    normalised map and a base-models-only view for convenience.
     """
     _MODEL_SIGNAL_KEYS = [
         "xgb_signal", "lstm_signal", "ppo_signal",
@@ -230,31 +254,35 @@ def get_learned_weights(model_path: str) -> Dict[str, float]:
 
     if not os.path.exists(model_path):
         equal = 1.0 / len(_MODEL_SIGNAL_KEYS)
-        return {k: equal for k in _MODEL_SIGNAL_KEYS}
+        return {"all": {k: equal for k in _MODEL_SIGNAL_KEYS},
+                "base_models": {k: equal for k in _MODEL_SIGNAL_KEYS}}
 
     try:
         with open(model_path, "rb") as f:
             artifacts = pickle.load(f)
 
         coefs     = artifacts.get("coefficients", {})
-        feat_list = artifacts.get("feature_list", [])
+        feat_list = artifacts.get("feature_list", list(coefs.keys()))
 
-        # Use absolute coefficient values as importance proxy
-        raw = {k: abs(coefs.get(k, 0.0)) for k in _MODEL_SIGNAL_KEYS if k in feat_list}
-        total = sum(raw.values()) or 1.0
-        weights = {k: round(v / total, 4) for k, v in raw.items()}
+        # Normalise |coef| across ALL features the model uses.
+        all_raw = {k: abs(coefs.get(k, 0.0)) for k in feat_list}
+        all_total = sum(all_raw.values()) or 1.0
+        all_weights = {k: round(v / all_total, 4) for k, v in all_raw.items()}
 
-        # Fill in any missing model keys with 0
+        # Base-models-only view (normalised among the 7 signals).
+        base_raw = {k: abs(coefs.get(k, 0.0)) for k in _MODEL_SIGNAL_KEYS if k in feat_list}
+        base_total = sum(base_raw.values()) or 1.0
+        base_weights = {k: round(v / base_total, 4) for k, v in base_raw.items()}
         for k in _MODEL_SIGNAL_KEYS:
-            if k not in weights:
-                weights[k] = 0.0
+            base_weights.setdefault(k, 0.0)
 
-        return weights
+        return {"all": all_weights, "base_models": base_weights}
 
     except Exception as exc:
         logger.warning("get_learned_weights failed: %s", exc)
         equal = 1.0 / len(_MODEL_SIGNAL_KEYS)
-        return {k: equal for k in _MODEL_SIGNAL_KEYS}
+        return {"all": {k: equal for k in _MODEL_SIGNAL_KEYS},
+                "base_models": {k: equal for k in _MODEL_SIGNAL_KEYS}}
 
 
 def compare_with_fixed_weights(

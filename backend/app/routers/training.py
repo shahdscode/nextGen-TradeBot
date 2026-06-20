@@ -1,8 +1,9 @@
 import uuid
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 from app.database import SessionLocal, Run
 from app.models.schemas import TrainRequest, RunResponse
 from app.tasks.train_tasks import train_task
+from app.services.auth_service import require_admin
 from app import finrl_wrapper
 from datetime import datetime
 
@@ -25,7 +26,7 @@ def _mark_stale_running_runs(db, stale_minutes: int = 30):
 
 
 @router.post("", response_model=RunResponse)
-def train(req: TrainRequest):
+def train(req: TrainRequest, _admin=Depends(require_admin)):
     run_id = str(uuid.uuid4())
     db = SessionLocal()
     run = Run(
@@ -77,6 +78,24 @@ def list_runs():
     ]
 
 
+@router.get("/runs/published")
+def list_published_runs():
+    db = SessionLocal()
+    runs = db.query(Run).filter(Run.published == True, Run.status == "done").order_by(Run.created_at.desc()).all()
+    db.close()
+    return [
+        RunResponse(
+            run_id=r.id,
+            algorithm=r.algorithm,
+            status=r.status,
+            created_at=str(r.created_at),
+            model_path=r.model_path,
+            metrics=r.metrics_json,
+        )
+        for r in runs
+    ]
+
+
 @router.get("/runs/{run_id}", response_model=RunResponse)
 def get_run(run_id: str):
     db = SessionLocal()
@@ -103,7 +122,7 @@ def list_agents():
 
 
 @router.post("/runs/{run_id}/publish")
-def publish_run(run_id: str):
+def publish_run(run_id: str, _admin=Depends(require_admin)):
     db = SessionLocal()
     run = db.query(Run).filter(Run.id == run_id).first()
     if not run:
@@ -120,7 +139,7 @@ def publish_run(run_id: str):
 
 
 @router.post("/runs/{run_id}/unpublish")
-def unpublish_run(run_id: str):
+def unpublish_run(run_id: str, _admin=Depends(require_admin)):
     db = SessionLocal()
     run = db.query(Run).filter(Run.id == run_id).first()
     if not run:
@@ -131,21 +150,3 @@ def unpublish_run(run_id: str):
     db.commit()
     db.close()
     return {"run_id": run_id, "published": False}
-
-
-@router.get("/runs/published")
-def list_published_runs():
-    db = SessionLocal()
-    runs = db.query(Run).filter(Run.published == True, Run.status == "done").order_by(Run.created_at.desc()).all()
-    db.close()
-    return [
-        RunResponse(
-            run_id=r.id,
-            algorithm=r.algorithm,
-            status=r.status,
-            created_at=str(r.created_at),
-            model_path=r.model_path,
-            metrics=r.metrics_json,
-        )
-        for r in runs
-    ]

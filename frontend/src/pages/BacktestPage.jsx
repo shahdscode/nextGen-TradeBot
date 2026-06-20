@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import client from '../api/client'
-import EquityCurveChart from '../components/equityCurveChart'
-import MetricsCard from '../components/metricsCard'
-import JobStatusBadge from '../components/jobStatusBadge'
-import { ChartSkeleton, CardSkeleton } from '../components/skeleton'
+import client, { getApiBase } from '../api/client'
+import EquityCurveChart from '../components/EquityCurveChart'
+import MetricsCard from '../components/MetricsCard'
+import JobStatusBadge from '../components/JobStatusBadge'
+import { ChartSkeleton, CardSkeleton } from '../components/Skeleton'
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 const fmtCurrency = (v) =>
@@ -556,7 +556,7 @@ function StepLogPanel({ summary, backtestId }) {
 
   const fetchPage = (page) => {
     setLoadErr(null)
-    fetch(`/api/backtest/${backtestId}/step-log?page=${page}&size=50`)
+    fetch(`${getApiBase()}/api/backtest/${backtestId}/step-log?page=${page}&size=50`)
       .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
       .then(d => {
         setStepRows(d.rows || [])
@@ -725,6 +725,92 @@ function MethodologyCard({ notes }) {
   )
 }
 
+// ── FinCast contextual-bandit backtest (faithful port of the FinCast notebook) ──
+function FinCastBacktestPanel() {
+  const [ticker, setTicker] = useState('AAPL')
+  const [market, setMarket] = useState('us')
+  const [windows, setWindows] = useState(2000)
+  const [status, setStatus] = useState(null)
+  const [result, setResult] = useState(null)
+  const [busy, setBusy] = useState(false)
+
+  const run = async () => {
+    setBusy(true); setResult(null); setStatus('pending')
+    try {
+      const q = { ticker, market, test_windows: windows, force: true }
+      const r = await client.post('/api/fincast/backtest', null, { params: q })
+      if (r.data.status === 'done') { setResult(r.data.result); setStatus('done'); setBusy(false); return }
+      const jobId = r.data.job_id
+      const timer = setInterval(async () => {
+        try {
+          const p = await client.get(`/api/fincast/backtest/${jobId}`)
+          setStatus(p.data.status)
+          if (p.data.status === 'done') { clearInterval(timer); setResult(p.data.result); setBusy(false) }
+          if (p.data.status === 'failed') { clearInterval(timer); toast.error(p.data.error || 'FinCast backtest failed'); setBusy(false) }
+        } catch { clearInterval(timer); setBusy(false) }
+      }, 5000)
+    } catch (e) {
+      toast.error(e.response?.data?.detail || 'FinCast backtest failed'); setBusy(false); setStatus(null)
+    }
+  }
+
+  const pct = (x) => (x == null ? '—' : `${(x * 100).toFixed(2)}%`)
+  const beat = result && result.edge_vs_buyhold > 0
+
+  return (
+    <div className="bg-white border border-violet-200 rounded-xl p-6 max-w-4xl mb-8">
+      <h2 className="text-sm font-semibold text-gray-900 mb-1">FinCast Backtest — contextual bandit on 5-min forecasts</h2>
+      <p className="text-xs text-gray-500 mb-4">
+        Faithful port of the FinCast notebook: FinCast forecasts each 5-min window; a contextual
+        bandit (BUY/HOLD/SELL) learns with delayed reward over the 60-step horizon; train on the
+        first 70% of windows, evaluate out-of-sample on the rest. 0.15% per-side cost. CPU inference
+        is slow — 2000 windows can take several minutes.
+      </p>
+      <div className="flex flex-wrap items-center gap-2 mb-4">
+        <select value={market} onChange={e => setMarket(e.target.value)} className="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <option value="us">US</option><option value="egx">EGX</option>
+        </select>
+        <input value={ticker} onChange={e => setTicker(e.target.value.toUpperCase())}
+          placeholder="AAPL" className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-32" />
+        <select value={windows} onChange={e => setWindows(Number(e.target.value))} className="border border-gray-300 rounded-lg px-3 py-2 text-sm">
+          <option value={400}>400 windows (fast)</option>
+          <option value={1000}>1000 windows</option>
+          <option value={2000}>2000 windows (notebook)</option>
+        </select>
+        <button onClick={run} disabled={busy || !ticker}
+          className="px-4 py-2 text-sm rounded-lg bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50">
+          {busy ? `Running… (${status})` : 'Run FinCast Backtest'}
+        </button>
+      </div>
+      {result?.ok && (
+        <>
+          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
+            {[
+              ['OOS return', pct(result.oos_return)],
+              ['Sharpe', result.sharpe_ratio?.toFixed(2)],
+              ['Max drawdown', pct(result.max_drawdown)],
+              ['Edge vs B&H', pct(result.edge_vs_buyhold)],
+              ['Buy & hold', pct(result.buyhold_return)],
+              ['Win rate', pct(result.win_rate)],
+              ['Test trades', result.test_trades],
+              ['Windows', `${result.n_windows} (${result.train_windows} tr)`],
+            ].map(([k, v], i) => (
+              <div key={i} className="bg-gray-50 rounded-lg p-3">
+                <div className="text-xs text-gray-500">{k}</div>
+                <div className={`text-lg font-bold ${k === 'Edge vs B&H' ? (beat ? 'text-green-600' : 'text-red-500') : 'text-gray-900'}`}>{v}</div>
+              </div>
+            ))}
+          </div>
+          <div className="text-xs text-gray-500">
+            actions — BUY {result.action_counts?.BUY}, HOLD {result.action_counts?.HOLD}, SELL {result.action_counts?.SELL}
+            {' · '}model {result.model}
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
+
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function BacktestPage() {
   const [searchParams] = useSearchParams()
@@ -817,6 +903,8 @@ export default function BacktestPage() {
       <p className="text-sm text-gray-500 mb-6">
         Evaluate a trained agent on historical data with full trading friction and benchmarks
       </p>
+
+      <FinCastBacktestPanel />
 
       {/* ── Config form ── */}
       <div className="bg-white border border-gray-200 rounded-xl p-6 max-w-4xl mb-8">

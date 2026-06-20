@@ -52,7 +52,12 @@ def mobile_dashboard(market: str = Query("us")):
         movers = []
 
     try:
-        signals = get_top_signals(market=market, limit=5)
+        # Pass every arg explicitly: get_top_signals has FastAPI Query(...)
+        # defaults that only resolve over HTTP. Called in-process, the unset
+        # params stay as Query objects (e.g. hours=Query(48)) and blow up in
+        # timedelta. Supplying real values keeps the in-process call working.
+        signals = get_top_signals(market=market, limit=5, action=None,
+                                  min_confidence=0.0, hours=48)
     except Exception as exc:
         log.warning("dashboard signals failed: %s", exc)
         signals = []

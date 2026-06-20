@@ -57,9 +57,13 @@ def _get_finbert():
 
 def _get_arabert():
     """
-    Lazily load AraBERT for Arabic-language sentiment.
-    Model: aubmindlab/bert-base-arabertv02 (~500 MB, downloaded once from HuggingFace).
-    Falls back to keyword scorer if the download fails or transformers is not installed.
+    Lazily load an Arabic SENTIMENT model.
+    Model: CAMeL-Lab/bert-base-arabic-camelbert-da-sentiment — an AraBERT-family
+    encoder FINETUNED for sentiment (positive/negative/neutral). The previous
+    base model (aubmindlab/bert-base-arabertv02) had an untrained classification
+    head and returned meaningless ~neutral scores for every headline.
+    Falls back to the keyword scorer if the download fails or transformers is
+    not installed.
     """
     global _arabert_pipeline, _arabert_attempted
     if _arabert_attempted:
@@ -72,7 +76,7 @@ def _get_arabert():
     try:
         _arabert_pipeline = hf_pipeline(
             "sentiment-analysis",
-            model="aubmindlab/bert-base-arabertv02",
+            model="CAMeL-Lab/bert-base-arabic-camelbert-da-sentiment",
             return_all_scores=True,
             device=-1,
         )
@@ -211,7 +215,67 @@ def _fetch_headlines(ticker: str, api_key: str) -> List[str]:
         except Exception:
             pass
 
+    # Fallback for EGX (.CA) tickers: Yahoo has no news for Egyptian listings,
+    # so query Google News RSS (free, keyless) by company name — Arabic first
+    # (routes to AraBERT), then English (FinBERT).
+    if not headlines and ticker.upper().endswith(".CA"):
+        names = EGX_COMPANY_NAMES.get(ticker.upper())
+        if names:
+            headlines = _google_news_rss(names["ar"], hl="ar", gl="EG", ceid="EG:ar")
+            if len(headlines) < 3:
+                headlines += _google_news_rss(names["en"] + " Egypt",
+                                              hl="en-EG", gl="EG", ceid="EG:en")
+            headlines = headlines[:10]
+
     return headlines
+
+
+# ── EGX news via Google News RSS ──────────────────────────────────────────────
+
+# English + Arabic company names for the EGX live universe. Arabic queries
+# return Arabic headlines, which score_headline() routes to AraBERT.
+EGX_COMPANY_NAMES = {
+    "COMI.CA": {"en": "Commercial International Bank CIB",   "ar": "البنك التجاري الدولي"},
+    "HRHO.CA": {"en": "EFG Hermes Holding",                  "ar": "المجموعة المالية هيرميس"},
+    "ETEL.CA": {"en": "Telecom Egypt",                       "ar": "المصرية للاتصالات"},
+    "TMGH.CA": {"en": "Talaat Moustafa Group",               "ar": "مجموعة طلعت مصطفى"},
+    "EFIH.CA": {"en": "e-finance Egypt",                     "ar": "اي فاينانس"},
+    "ABUK.CA": {"en": "Abu Qir Fertilizers",                 "ar": "أبو قير للأسمدة"},
+    "SWDY.CA": {"en": "Elsewedy Electric",                   "ar": "السويدي اليكتريك"},
+    "EAST.CA": {"en": "Eastern Company tobacco",             "ar": "الشرقية للدخان"},
+    "AMOC.CA": {"en": "Alexandria Mineral Oils AMOC",        "ar": "الإسكندرية للزيوت المعدنية"},
+    "ESRS.CA": {"en": "Ezz Steel",                           "ar": "حديد عز"},
+    "ORWE.CA": {"en": "Oriental Weavers",                    "ar": "النساجون الشرقيون"},
+    "PHDC.CA": {"en": "Palm Hills Developments",             "ar": "بالم هيلز للتعمير"},
+    "OCDI.CA": {"en": "SODIC Egypt",                         "ar": "سوديك"},
+    "MFPC.CA": {"en": "Misr Fertilizers MOPCO",              "ar": "موبكو للأسمدة"},
+    "FWRY.CA": {"en": "Fawry payments",                      "ar": "فوري للمدفوعات"},
+    "CLHO.CA": {"en": "Cleopatra Hospitals",                 "ar": "مستشفيات كليوباترا"},
+    "GBCO.CA": {"en": "GB Corp Ghabbour Auto",               "ar": "جي بي كورب غبور"},
+    "ISPH.CA": {"en": "Ibnsina Pharma",                      "ar": "ابن سينا فارما"},
+    "EGTS.CA": {"en": "Egyptian Resorts Company",            "ar": "المصرية للمنتجعات السياحية"},
+    "ACGC.CA": {"en": "Arab Cotton Ginning",                 "ar": "العربية لحليج الأقطان"},
+    "BTFH.CA": {"en": "Beltone Financial Holding",           "ar": "بلتون المالية"},
+}
+
+
+def _google_news_rss(query: str, hl: str = "en", gl: str = "US",
+                     ceid: str = "US:en", limit: int = 8) -> List[str]:
+    """Fetch recent headlines from Google News RSS (free, keyless)."""
+    try:
+        import xml.etree.ElementTree as ET
+        from urllib.parse import quote
+        url = (f"https://news.google.com/rss/search?q={quote(query)}"
+               f"&hl={hl}&gl={gl}&ceid={ceid}")
+        resp = requests.get(url, timeout=10,
+                            headers={"User-Agent": "Mozilla/5.0"})
+        if not resp.ok:
+            return []
+        root = ET.fromstring(resp.content)
+        titles = [item.findtext("title", "") for item in root.iter("item")]
+        return [t.strip() for t in titles if t and t.strip()][:limit]
+    except Exception:
+        return []
 
 
 def _demo_headlines(ticker: str) -> List[str]:
@@ -231,14 +295,18 @@ def _keyword_sentiment(text: str) -> Dict[str, Any]:
     positive_words = [
         "rise", "rally", "surge", "gain", "profit", "beat", "strong", "bull",
         "growth", "upgrade", "buy", "positive", "record", "high", "increase",
-        # Arabic transliterations / common positive finance words
-        "ارتفع", "نمو", "ربح", "إيجابي", "قوي",
+        # Arabic financial-news positive vocabulary
+        "ارتفع", "ارتفاع", "نمو", "ربح", "أرباح", "إيجابي", "قوي", "زيادة",
+        "تتجاوز", "يتجاوز", "صعود", "مكاسب", "قياسي", "توسع", "اتفاقية",
+        "تمويل", "استثمار", "شراكة", "تفاهم", "فوز", "نجاح", "تحسن",
     ]
     negative_words = [
         "fall", "drop", "plunge", "loss", "miss", "weak", "bear", "decline",
         "downgrade", "sell", "negative", "low", "decrease", "crash", "concern",
-        # Arabic transliterations / common negative finance words
-        "انخفض", "خسارة", "هبوط", "سلبي", "ضعيف",
+        # Arabic financial-news negative vocabulary
+        "انخفض", "انخفاض", "خسارة", "خسائر", "هبوط", "سلبي", "ضعيف", "تراجع",
+        "أزمة", "ديون", "عجز", "إفلاس", "غرامة", "تحقيق", "إغلاق", "توقف",
+        "مخاوف", "تأجيل",
     ]
     pos   = sum(1 for w in positive_words if w in text_lower)
     neg   = sum(1 for w in negative_words if w in text_lower)

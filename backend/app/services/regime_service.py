@@ -32,6 +32,15 @@ REGIME_WEIGHTS = {
 REGIME_MODEL_PATH = str(Path(settings.models_dir) / "regime_model.json")
 
 
+def _regime_path(market: str = "us") -> str:
+    """Per-market cache file. US keeps the legacy filename for back-compat;
+    other markets get their own (a shared file made EGX show the US regime)."""
+    m = (market or "us").lower()
+    if m == "us":
+        return REGIME_MODEL_PATH
+    return str(Path(settings.models_dir) / f"regime_model_{m}.json")
+
+
 def train_regime_model(market: str = "us") -> Dict[str, Any]:
     """Train (or retrain) the HMM regime model and persist state thresholds."""
     features = _fetch_regime_features(market)
@@ -61,8 +70,9 @@ def train_regime_model(market: str = "us") -> Dict[str, Any]:
     else:
         result = _rule_based_regime(features)
 
+    result["market"] = market
     Path("./data/models").mkdir(parents=True, exist_ok=True)
-    with open(REGIME_MODEL_PATH, "w") as f:
+    with open(_regime_path(market), "w") as f:
         json.dump(result, f)
 
     return result
@@ -71,7 +81,7 @@ def train_regime_model(market: str = "us") -> Dict[str, Any]:
 def get_current_regime(market: str = "us") -> str:
     """Return current regime label: BULL | BEAR | SIDEWAYS."""
     try:
-        with open(REGIME_MODEL_PATH) as f:
+        with open(_regime_path(market)) as f:
             data = json.load(f)
         # Refresh if stale (older than 1 day) — simple check via the saved result
         return data.get("current_regime", "BULL")
@@ -88,7 +98,7 @@ def get_regime_weights(regime: str) -> Dict[str, float]:
 
 def get_regime_info(market: str = "us") -> Dict[str, Any]:
     try:
-        with open(REGIME_MODEL_PATH) as f:
+        with open(_regime_path(market)) as f:
             data = json.load(f)
         data["weights"] = get_regime_weights(data.get("current_regime", "BULL"))
         if data.get("method") == "synthetic":

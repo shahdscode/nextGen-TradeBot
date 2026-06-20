@@ -20,8 +20,24 @@ from app.database import SessionLocal, Signal
 
 logger = logging.getLogger(__name__)
 
-CONFIDENCE_THRESHOLD         = 0.55   # suppress signals below this
+CONFIDENCE_THRESHOLD         = 0.55   # default (US) suppress threshold
 TURBULENCE_SUPPRESS_PERCENTILE = 90   # BUY suppression above this turbulence percentile
+
+# Per-market action bands. US keeps the conservative defaults. EGX models are
+# genuinely lower-confidence (no strong out-of-sample edge — see OOF eval), so
+# without a lower band every EGX signal is suppressed and users see an empty
+# feed. The EGX band is shifted down so weak-conviction signals still surface
+# (mostly HOLD, with the top names as BUY). Public floor in signals/top must
+# match the lowest suppress value here.
+THRESHOLDS_BY_MARKET = {
+    "us":  {"suppress": 0.55, "buy": 0.58, "sell": 0.44},
+    "egx": {"suppress": 0.50, "buy": 0.52, "sell": 0.44},
+}
+
+
+def market_thresholds(market: str) -> Dict[str, float]:
+    """Return the suppress/buy/sell band for a market (defaults to US)."""
+    return THRESHOLDS_BY_MARKET.get((market or "us").lower(), THRESHOLDS_BY_MARKET["us"])
 
 
 # ── Turbulence hard filter ────────────────────────────────────────────────────
@@ -170,9 +186,11 @@ def fuse_signals(
 def apply_risk_guardrails(
     confidence: float,
     regime: str,
+    market: str = "us",
 ) -> Dict[str, Any]:
-    """Check confidence threshold and compute risk metadata."""
-    suppressed = confidence < CONFIDENCE_THRESHOLD
+    """Check confidence threshold and compute risk metadata (market-aware)."""
+    threshold = market_thresholds(market)["suppress"]
+    suppressed = confidence < threshold
 
     stop_loss_map = {"BULL": 2.5, "BEAR": 4.0, "SIDEWAYS": 3.0}
     stop_loss_pct = stop_loss_map.get(regime, 3.0)
@@ -188,7 +206,7 @@ def apply_risk_guardrails(
         "suppressed":           suppressed,
         "risk_level":           risk_level,
         "stop_loss_pct":        stop_loss_pct,
-        "confidence_threshold": CONFIDENCE_THRESHOLD,
+        "confidence_threshold": threshold,
     }
 
 
@@ -213,12 +231,13 @@ def build_signal_card(
 ) -> Dict[str, Any]:
     """Assemble the full signal card for display."""
     confidence = fused["confidence"]
+    band = market_thresholds(market)
 
     if guardrails["suppressed"] or fused.get("turbulence_suppressed"):
         action = "SUPPRESSED"
-    elif confidence >= 0.58:
+    elif confidence >= band["buy"]:
         action = "BUY"
-    elif confidence <= 0.44:
+    elif confidence <= band["sell"]:
         action = "SELL"
     else:
         action = "HOLD"
@@ -258,6 +277,85 @@ def build_signal_card(
 
 # ── Full signal pipeline ───────────────────────────────────────────────────────
 
+def deployable_base_signals(market: str = "us") -> Dict[str, Dict]:
+    """
+    Compute per-ticker XGBoost + LSTM probabilities from the POOLED DEPLOYABLE
+    models (data/models/deploy/). Returns {ticker: {xgb, lstm, shap}}.
+
+    These are the same models that power live Alpaca trading, so signal
+    generation no longer depends on per-ticker per-run model files (which the
+    OOF training steps never saved). Includes SHAP top-features for explainability.
+    """
+    import pickle
+    import numpy as np
+    import pandas as pd
+    from pathlib import Path
+    from app.config import settings
+    from app.services.live_trading_service import _latest_featured
+
+    deploy = Path(settings.models_dir) / "deploy"
+    if not (deploy / "xgb_deploy.pkl").exists() or not (deploy / "lstm_deploy.pt").exists():
+        return {}
+
+    featured, latest_date = _latest_featured(market)
+    latest = featured[pd.to_datetime(featured["date"]) == latest_date].copy()
+    out: Dict[str, Dict] = {}
+
+    # XGBoost (pooled) + SHAP
+    with open(deploy / "xgb_deploy.pkl", "rb") as f:
+        xgb_bundle = pickle.load(f)
+    xgb_model, xgb_feats = xgb_bundle["model"], xgb_bundle["features"]
+    explainer = None
+    try:
+        import shap
+        explainer = shap.TreeExplainer(xgb_model)
+    except Exception:
+        explainer = None
+    for _, r in latest.iterrows():
+        x = r[xgb_feats].values.astype(np.float32).reshape(1, -1)
+        prob = float(xgb_model.predict_proba(x)[0][1])
+        shap_top = []
+        if explainer is not None:
+            try:
+                sv = explainer.shap_values(x)
+                sv = sv[0] if isinstance(sv, list) else sv
+                contribs = sorted(zip(xgb_feats, np.ravel(sv)),
+                                  key=lambda kv: abs(kv[1]), reverse=True)[:5]
+                shap_top = [{"feature": f, "shap_value": round(float(v), 4)} for f, v in contribs]
+            except Exception:
+                shap_top = []
+        out[r["tic"]] = {"xgb": prob, "lstm": 0.5, "shap": shap_top}
+
+    # LSTM (pooled, last-seq_len sequence per ticker)
+    try:
+        import torch, torch.nn as nn
+        ck = torch.load(deploy / "lstm_deploy.pt")
+        seq_len, lf = ck["seq_len"], ck["features"]
+        with open(deploy / "lstm_scaler.pkl", "rb") as f:
+            lstm_scaler = pickle.load(f)
+
+        class LSTMClf(nn.Module):
+            def __init__(self, n):
+                super().__init__()
+                self.lstm = nn.LSTM(n, 64, num_layers=2, batch_first=True, dropout=0.3)
+                self.fc = nn.Linear(64, 1); self.sig = nn.Sigmoid()
+            def forward(self, x):
+                o, _ = self.lstm(x); return self.sig(self.fc(o[:, -1, :]))
+
+        lstm_model = LSTMClf(ck["n_features"]); lstm_model.load_state_dict(ck["state_dict"]); lstm_model.eval()
+        for tic in out:
+            g = featured[featured["tic"] == tic].sort_values("date")
+            if len(g) < seq_len:
+                continue
+            seq = lstm_scaler.transform(g[lf].values.astype(np.float32))[-seq_len:]
+            with torch.no_grad():
+                out[tic]["lstm"] = float(lstm_model(torch.tensor(seq).unsqueeze(0)).item())
+    except Exception as exc:
+        logger.warning("LSTM deployable inference failed: %s", exc)
+
+    return out
+
+
 def generate_full_signal(
     ticker: str,
     market: str                  = "us",
@@ -279,6 +377,11 @@ def generate_full_signal(
     use_meta_learner:     bool          = False,
     use_adaptive_weights: bool          = False,
     db_session                          = None,
+    # Pre-computed base probabilities (e.g. from the pooled deployable models).
+    # When provided, they bypass per-run model-path prediction.
+    xgb_prob_override:  Optional[float] = None,
+    lstm_prob_override: Optional[float] = None,
+    shap_features_override: Optional[List[Dict]] = None,
 ) -> Dict[str, Any]:
     """
     Full signal generation pipeline for one ticker.
@@ -288,9 +391,9 @@ def generate_full_signal(
     sentiment = fetch_and_score(ticker)
 
     # ── XGBoost ──────────────────────────────────────────────────────────────
-    xgb_prob = 0.5
-    shap_features: List[Dict] = []
-    if xgb_model_path and df is not None:
+    xgb_prob = 0.5 if xgb_prob_override is None else float(xgb_prob_override)
+    shap_features: List[Dict] = shap_features_override or []
+    if xgb_prob_override is None and xgb_model_path and df is not None:
         try:
             from app.services.xgboost_service import predict_xgboost
             from app.services.feature_service import build_features, prepare_xy, FEATURE_COLUMNS
@@ -304,8 +407,8 @@ def generate_full_signal(
             logger.debug("XGB inference failed for %s: %s", ticker, exc)
 
     # ── LSTM ─────────────────────────────────────────────────────────────────
-    lstm_prob = 0.5
-    if lstm_model_path and df is not None:
+    lstm_prob = 0.5 if lstm_prob_override is None else float(lstm_prob_override)
+    if lstm_prob_override is None and lstm_model_path and df is not None:
         try:
             from app.services.lstm_service import predict_lstm
             from app.services.feature_service import build_features, prepare_xy
@@ -340,7 +443,7 @@ def generate_full_signal(
         use_adaptive_weights=use_adaptive_weights, db_session=db_session,
     )
 
-    guardrails = apply_risk_guardrails(fused["confidence"], regime)
+    guardrails = apply_risk_guardrails(fused["confidence"], regime, market)
 
     # ── Turbulence hard filter ────────────────────────────────────────────────
     if turbulence is not None and turbulence_history:

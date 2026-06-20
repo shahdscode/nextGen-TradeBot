@@ -18,19 +18,36 @@ def get_top_signals(
     hours: int = Query(48),
 ):
     """Get the most recent non-suppressed signals."""
+    # Market-aware visibility floor — must match the per-market suppress
+    # threshold in fusion_service so EGX (lower-confidence) signals aren't
+    # hidden here after passing suppression.
+    from app.services.fusion_service import market_thresholds, THRESHOLDS_BY_MARKET
+    if market == "all":
+        floor = min(b["suppress"] for b in THRESHOLDS_BY_MARKET.values())
+    else:
+        floor = market_thresholds(market)["suppress"]
     db = SessionLocal()
     try:
         cutoff = datetime.utcnow() - timedelta(hours=hours)
         q = db.query(Signal).filter(
             Signal.generated_at >= cutoff,
-            Signal.confidence >= max(min_confidence, 0.55),
+            Signal.confidence >= max(min_confidence, floor),
         )
         if market != "all":
             q = q.filter(Signal.market == market)
         if action:
             q = q.filter(Signal.action == action.upper())
 
-        signals = q.order_by(Signal.confidence.desc()).limit(limit).all()
+        # Keep only the most recent signal per ticker (signals are regenerated
+        # daily; older rows in the window would otherwise duplicate a ticker),
+        # then rank the de-duped set by confidence.
+        rows = q.order_by(Signal.generated_at.desc()).all()
+        latest_by_ticker = {}
+        for s in rows:
+            if s.ticker not in latest_by_ticker:
+                latest_by_ticker[s.ticker] = s
+        signals = sorted(latest_by_ticker.values(),
+                         key=lambda s: s.confidence, reverse=True)[:limit]
         return [_serialize(s) for s in signals]
     finally:
         db.close()
