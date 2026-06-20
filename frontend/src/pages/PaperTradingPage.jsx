@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import { LineChart, Line, ResponsiveContainer, YAxis, Tooltip } from 'recharts'
 import client from '../api/client'
-import { CardSkeleton } from '../components/skeleton'
+import { CardSkeleton } from '../components/Skeleton'
 
 export default function PaperTradingPage() {
   const [loading, setLoading] = useState(true)

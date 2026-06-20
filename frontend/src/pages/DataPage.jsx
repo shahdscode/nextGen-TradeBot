@@ -2,8 +2,8 @@ import { useState, useEffect, useMemo, useCallback } from 'react'
 import Select from 'react-select'
 import toast from 'react-hot-toast'
 import client from '../api/client'
-import JobStatusBadge from '../components/jobStatusBadge'
-import { CardSkeleton, TableSkeleton } from '../components/skeleton'
+import JobStatusBadge from '../components/JobStatusBadge'
+import { CardSkeleton, TableSkeleton } from '../components/Skeleton'
 
 const sourceOptions = [
   { value: 'yahoo', label: 'Yahoo Finance — US (S&P 500, ETFs, indices)' },

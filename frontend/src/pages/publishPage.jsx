@@ -1,8 +1,8 @@
 import { useState, useEffect } from 'react'
 import toast from 'react-hot-toast'
 import client from '../api/client'
-import JobStatusBadge from '../components/jobStatusBadge'
-import { TableSkeleton } from '../components/skeleton'
+import JobStatusBadge from '../components/JobStatusBadge'
+import { TableSkeleton } from '../components/Skeleton'
 
 // Default fallback lists — kept as safety net when no data jobs exist
 const DEFAULT_US_TICKERS = [

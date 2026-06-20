@@ -1,6 +1,6 @@
 import { useState, useEffect } from 'react'
 import client from '../api/client'
-import { TableSkeleton } from '../components/skeleton'
+import { TableSkeleton } from '../components/Skeleton'
 
 const actionBadge = {
   BUY:  'bg-emerald-100 text-emerald-700',

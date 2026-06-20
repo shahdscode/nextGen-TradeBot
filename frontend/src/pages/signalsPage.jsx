@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react'
 import client from '../api/client'
 import SignalCard from '../components/signalCard'
-import { CardSkeleton } from '../components/skeleton'
+import { CardSkeleton } from '../components/Skeleton'
 
 const MARKETS = [
   { value: 'us', label: 'US Market' },

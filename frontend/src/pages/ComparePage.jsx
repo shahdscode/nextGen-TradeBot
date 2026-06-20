@@ -1,9 +1,9 @@
 import { useState, useEffect } from 'react'
 import toast from 'react-hot-toast'
 import client from '../api/client'
-import EquityCurveChart from '../components/equityCurveChart'
-import AgentCompareTable from '../components/agentCompareTable'
-import { ChartSkeleton, TableSkeleton } from '../components/skeleton'
+import EquityCurveChart from '../components/EquityCurveChart'
+import AgentCompareTable from '../components/AgentCompareTable'
+import { ChartSkeleton, TableSkeleton } from '../components/Skeleton'
 
 export default function ComparePage() {
   const [backtests, setBacktests] = useState([])

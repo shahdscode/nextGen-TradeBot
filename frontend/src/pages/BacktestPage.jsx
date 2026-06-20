@@ -1,11 +1,11 @@
 import React, { useState, useEffect } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import toast from 'react-hot-toast'
-import client from '../api/client'
-import EquityCurveChart from '../components/equityCurveChart'
-import MetricsCard from '../components/metricsCard'
-import JobStatusBadge from '../components/jobStatusBadge'
-import { ChartSkeleton, CardSkeleton } from '../components/skeleton'
+import client, { getApiBase } from '../api/client'
+import EquityCurveChart from '../components/EquityCurveChart'
+import MetricsCard from '../components/MetricsCard'
+import JobStatusBadge from '../components/JobStatusBadge'
+import { ChartSkeleton, CardSkeleton } from '../components/Skeleton'
 
 // ── Formatters ────────────────────────────────────────────────────────────────
 const fmtCurrency = (v) =>
@@ -556,7 +556,7 @@ function StepLogPanel({ summary, backtestId }) {
 
   const fetchPage = (page) => {
     setLoadErr(null)
-    fetch(`/api/backtest/${backtestId}/step-log?page=${page}&size=50`)
+    fetch(`${getApiBase()}/api/backtest/${backtestId}/step-log?page=${page}&size=50`)
       .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
       .then(d => {
         setStepRows(d.rows || [])
