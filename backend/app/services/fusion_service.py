@@ -20,8 +20,24 @@ from app.database import SessionLocal, Signal
 
 logger = logging.getLogger(__name__)
 
-CONFIDENCE_THRESHOLD         = 0.55   # suppress signals below this
+CONFIDENCE_THRESHOLD         = 0.55   # default (US) suppress threshold
 TURBULENCE_SUPPRESS_PERCENTILE = 90   # BUY suppression above this turbulence percentile
+
+# Per-market action bands. US keeps the conservative defaults. EGX models are
+# genuinely lower-confidence (no strong out-of-sample edge — see OOF eval), so
+# without a lower band every EGX signal is suppressed and users see an empty
+# feed. The EGX band is shifted down so weak-conviction signals still surface
+# (mostly HOLD, with the top names as BUY). Public floor in signals/top must
+# match the lowest suppress value here.
+THRESHOLDS_BY_MARKET = {
+    "us":  {"suppress": 0.55, "buy": 0.58, "sell": 0.44},
+    "egx": {"suppress": 0.50, "buy": 0.52, "sell": 0.44},
+}
+
+
+def market_thresholds(market: str) -> Dict[str, float]:
+    """Return the suppress/buy/sell band for a market (defaults to US)."""
+    return THRESHOLDS_BY_MARKET.get((market or "us").lower(), THRESHOLDS_BY_MARKET["us"])
 
 
 # ── Turbulence hard filter ────────────────────────────────────────────────────
@@ -170,9 +186,11 @@ def fuse_signals(
 def apply_risk_guardrails(
     confidence: float,
     regime: str,
+    market: str = "us",
 ) -> Dict[str, Any]:
-    """Check confidence threshold and compute risk metadata."""
-    suppressed = confidence < CONFIDENCE_THRESHOLD
+    """Check confidence threshold and compute risk metadata (market-aware)."""
+    threshold = market_thresholds(market)["suppress"]
+    suppressed = confidence < threshold
 
     stop_loss_map = {"BULL": 2.5, "BEAR": 4.0, "SIDEWAYS": 3.0}
     stop_loss_pct = stop_loss_map.get(regime, 3.0)
@@ -188,7 +206,7 @@ def apply_risk_guardrails(
         "suppressed":           suppressed,
         "risk_level":           risk_level,
         "stop_loss_pct":        stop_loss_pct,
-        "confidence_threshold": CONFIDENCE_THRESHOLD,
+        "confidence_threshold": threshold,
     }
 
 
@@ -213,12 +231,13 @@ def build_signal_card(
 ) -> Dict[str, Any]:
     """Assemble the full signal card for display."""
     confidence = fused["confidence"]
+    band = market_thresholds(market)
 
     if guardrails["suppressed"] or fused.get("turbulence_suppressed"):
         action = "SUPPRESSED"
-    elif confidence >= 0.58:
+    elif confidence >= band["buy"]:
         action = "BUY"
-    elif confidence <= 0.44:
+    elif confidence <= band["sell"]:
         action = "SELL"
     else:
         action = "HOLD"
@@ -424,7 +443,7 @@ def generate_full_signal(
         use_adaptive_weights=use_adaptive_weights, db_session=db_session,
     )
 
-    guardrails = apply_risk_guardrails(fused["confidence"], regime)
+    guardrails = apply_risk_guardrails(fused["confidence"], regime, market)
 
     # ── Turbulence hard filter ────────────────────────────────────────────────
     if turbulence is not None and turbulence_history:

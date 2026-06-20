@@ -18,12 +18,20 @@ def get_top_signals(
     hours: int = Query(48),
 ):
     """Get the most recent non-suppressed signals."""
+    # Market-aware visibility floor — must match the per-market suppress
+    # threshold in fusion_service so EGX (lower-confidence) signals aren't
+    # hidden here after passing suppression.
+    from app.services.fusion_service import market_thresholds, THRESHOLDS_BY_MARKET
+    if market == "all":
+        floor = min(b["suppress"] for b in THRESHOLDS_BY_MARKET.values())
+    else:
+        floor = market_thresholds(market)["suppress"]
     db = SessionLocal()
     try:
         cutoff = datetime.utcnow() - timedelta(hours=hours)
         q = db.query(Signal).filter(
             Signal.generated_at >= cutoff,
-            Signal.confidence >= max(min_confidence, 0.55),
+            Signal.confidence >= max(min_confidence, floor),
         )
         if market != "all":
             q = q.filter(Signal.market == market)
