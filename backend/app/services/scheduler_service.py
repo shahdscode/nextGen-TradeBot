@@ -20,11 +20,35 @@ from datetime import datetime, timezone
 logger = logging.getLogger(__name__)
 
 REBALANCE_HOUR_UTC = 21      # ~after US close (16:00–17:00 ET)
+SIGNALS_HOUR_UTC   = 21      # regenerate the signal feed daily after close
 CHECK_INTERVAL_SEC = 1800    # check every 30 min
 REBALANCE_WEEKDAY  = 0       # Monday — rebalance once per week (daily-trained
                              # models + weekly cadence avoids friction churn)
 _last_run_week: str | None = None
+_last_signal_day: str | None = None
 _started = False
+
+
+def _run_daily_signals():
+    """Regenerate the user-facing signal feed for US + EGX once per day, so the
+    48h /signals/top window never goes empty without a manual admin run."""
+    import uuid
+    from app.database import SessionLocal, Job
+    from app.tasks.ml_tasks import generate_signals_task
+    from app.services.live_trading_service import LIVE_TICKERS, EGX_LIVE_TICKERS
+
+    for market, tickers in (("us", LIVE_TICKERS), ("egx", EGX_LIVE_TICKERS)):
+        job_id = str(uuid.uuid4())
+        db = SessionLocal()
+        try:
+            db.add(Job(id=job_id, type="signal_generation", status="pending",
+                       created_at=datetime.utcnow(),
+                       meta={"tickers": tickers, "market": market, "scheduled": True}))
+            db.commit()
+        finally:
+            db.close()
+        generate_signals_task.delay(job_id=job_id, tickers=tickers, market=market)
+        logger.info("Daily signal generation queued: %s (%d tickers)", market, len(tickers))
 
 
 def _apply(alloc: dict, cash: float, db, PaperSession):
@@ -119,12 +143,18 @@ def _run_weekly_rebalance():
 
 
 def _loop():
-    global _last_run_week
+    global _last_run_week, _last_signal_day
     while True:
         try:
             now = datetime.now(timezone.utc)
             iso_week = f"{now.isocalendar().year}-W{now.isocalendar().week}"
-            # Rebalance once per ISO week, on REBALANCE_WEEKDAY after close hour
+            iso_day = now.strftime("%Y-%m-%d")
+            # Daily: regenerate the signal feed after close
+            if now.hour >= SIGNALS_HOUR_UTC and _last_signal_day != iso_day:
+                logger.info("Triggering daily signal generation (%s)", iso_day)
+                _run_daily_signals()
+                _last_signal_day = iso_day
+            # Weekly: rebalance the active paper session on REBALANCE_WEEKDAY after close
             if (now.weekday() == REBALANCE_WEEKDAY
                     and now.hour >= REBALANCE_HOUR_UTC
                     and _last_run_week != iso_week):
@@ -139,6 +169,11 @@ def _loop():
 def trigger_rebalance_now():
     """Manual one-off trigger (used by an API endpoint / testing)."""
     _run_weekly_rebalance()
+
+
+def trigger_daily_signals_now():
+    """Manual one-off trigger for the daily signal-feed regeneration."""
+    _run_daily_signals()
 
 
 def start_scheduler():

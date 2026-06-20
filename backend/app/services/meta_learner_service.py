@@ -202,7 +202,20 @@ def predict_meta_learner(
         x = np.array([[feature_dict.get(f, 0.0) for f in feat_list]], dtype=np.float32)
         x_s = scaler.transform(x)
 
-        prob = float(model.predict_proba(x_s)[0, 1])
+        raw_prob = float(model.predict_proba(x_s)[0, 1])
+
+        # Apply Platt calibration if a fitted calibrator exists, so the served
+        # probability matches the calibrated confidence reported in evaluation.
+        prob, calibrated = raw_prob, False
+        try:
+            from app.config import settings
+            cal_path = os.path.join(settings.models_dir, "calibrator.pkl")
+            if os.path.exists(cal_path):
+                from app.services.calibration_service import calibrate_score
+                prob = float(calibrate_score(raw_prob, cal_path))
+                calibrated = True
+        except Exception as exc:
+            logger.debug("calibration skipped: %s", exc)
 
         # Per-feature contribution (coef × scaled_value)
         coef = model.coef_[0]
@@ -213,6 +226,8 @@ def predict_meta_learner(
 
         return {
             "probability":           round(prob, 4),
+            "raw_probability":       round(raw_prob, 4),
+            "calibrated":            calibrated,
             "signal":                round(prob, 4),
             "method":                "meta_learner",
             "feature_contributions": contributions,

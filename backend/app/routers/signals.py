@@ -38,7 +38,16 @@ def get_top_signals(
         if action:
             q = q.filter(Signal.action == action.upper())
 
-        signals = q.order_by(Signal.confidence.desc()).limit(limit).all()
+        # Keep only the most recent signal per ticker (signals are regenerated
+        # daily; older rows in the window would otherwise duplicate a ticker),
+        # then rank the de-duped set by confidence.
+        rows = q.order_by(Signal.generated_at.desc()).all()
+        latest_by_ticker = {}
+        for s in rows:
+            if s.ticker not in latest_by_ticker:
+                latest_by_ticker[s.ticker] = s
+        signals = sorted(latest_by_ticker.values(),
+                         key=lambda s: s.confidence, reverse=True)[:limit]
         return [_serialize(s) for s in signals]
     finally:
         db.close()
