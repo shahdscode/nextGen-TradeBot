@@ -22,3 +22,16 @@ requests>=2.31.0
 # ── Data (used in routers/services for price calculations) ────────────────────
 numpy>=1.26.4
 pandas>=2.2.2
+
+# ── FinCast forecasting model (backend/fincast/) ──────────────────────────────
+# The finetuned FinCast foundation model (TimesFM-derived MoE + LoRA/DoRA adapter).
+# peft 0.19.1 needs transformers >= ~4.43; CoLT5-attention pulled torch 2.12.
+# Verified the existing FinRL/SB3/FinBERT stack still works under these versions.
+peft==0.19.1
+transformers==4.46.3
+einops>=0.8
+einx>=0.4
+beartype>=0.20
+utilsforecast>=0.2.12
+CoLT5-attention>=0.11
+accelerate>=1.0

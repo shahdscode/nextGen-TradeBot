@@ -26,6 +26,9 @@ mobile/android/
 # Runtime data (datasets, models, DB — keep locally, do not commit)
 data/
 backend/data/
+# FinCast model weights dropped here manually (multi-GB .pth + LoRA adapter);
+# never commit — GitHub rejects >100MB files.
+backend/models/
 # Exception: fold definitions are small, team-critical, must be shared via git
 !backend/data/oof/
 !backend/data/oof/fold_definitions.json

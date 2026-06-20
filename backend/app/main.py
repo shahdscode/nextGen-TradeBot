@@ -6,7 +6,7 @@ from app.routers import auth, paper_trading, signals, market
 
 # ML/RL routers — only loaded when heavy dependencies are installed
 try:
-    from app.routers import data, training, backtest, ml, research, mobile
+    from app.routers import data, training, backtest, ml, research, mobile, fincast
     _ml_available = True
 except ImportError:
     _ml_available = False
@@ -90,3 +90,4 @@ if _ml_available:
     app.include_router(ml.router, prefix="/api")
     app.include_router(research.router, prefix="/api")
     app.include_router(mobile.router, prefix="/api")
+    app.include_router(fincast.router, prefix="/api")
