@@ -22,7 +22,9 @@ using a leakage-controlled walk-forward protocol retrained through the present d
 This is a deliberately honest, falsifiable result. It is consistent with the Efficient
 Market Hypothesis (Fama, 1970) and with the modern backtesting-protocol literature
 (Arnott, Harvey & Markowitz, 2019), which warns that in-sample performance is not
-evidence of a real edge.
+evidence of a real edge. The finding holds across **all** approaches evaluated — XGBoost,
+LSTM, five RL agents, a stacking meta-learner (§3.3), and a 5-minute foundation-model
+forecaster (FinCast) with a contextual-bandit trader (§3.10) — which only strengthens it.
 
 ---
 
@@ -136,6 +138,14 @@ The meta-learner (0.524 AUC) edges the best base learner (0.515) — a small but
 predicted by stacked generalisation (Wolpert, 1992). It does **not**, however, lift
 predictability off the efficiency ceiling.
 
+Two notes on the inputs. First, across **all** features (not just the base signals) the
+single largest coefficient is `regime_bear` (|coef|-share ≈ 0.20) — the ensemble leans on
+regime context more than on any one base model. Second, the `sentiment_score` feature was
+**removed**: the wired news sources are recent-only, so its OOF training column was a
+constant 0.0 (zero coefficient, no signal). Removing it left validation AUC unchanged
+(0.524), confirming it was inert; live signal cards still surface real *current* sentiment
+via the fusion layer, it is simply not a meta-learner training input.
+
 ### 3.4 Adaptive EWMA weights (Hedge algorithm)
 
 Daily EWMA performance tracking (λ = 0.94) over 1,584 trading dates converges to
@@ -243,6 +253,102 @@ precision is preferred over signal frequency. This is the honest answer to "how 
 improve win rate": trade less, on higher conviction — the curve quantifies exactly what
 that buys.
 
+### 3.8 Confidence calibration (Platt scaling)
+
+Platt scaling (Platt, 1999) was fit on the meta-learner's **validation window only**
+(19,170 rows) — mapping its raw probabilities to empirical outcome frequencies
+(`target_5d`) — and evaluated by Brier score and a reliability diagram:
+
+| Metric | Value |
+|--------|------:|
+| Brier score (before) | 0.2491 |
+| Brier score (after Platt) | 0.2479 |
+
+The improvement is **marginal by design**: a logistic-regression meta-learner already
+emits well-formed probabilities, so the reliability curve tracks the diagonal closely and
+Platt scaling has little to correct. This is the honest reading — the confidence scores
+can be interpreted *as probabilities* (validating the confidence-gated suppression in §3.7),
+and calibration adds a small, real refinement rather than a large correction. The fitted
+calibrator (`data/models/calibrator.pkl`) and reliability diagram
+(`data/results/reliability_diagram.png`) are produced by `calibration_service.py`.
+
+### 3.9 US vs EGX comparison
+
+The same leakage-controlled protocol was applied to the Egyptian market (EGX, 21 `.CA`
+tickers, 25,919 OOF rows). **Directional predictability sits at the same efficiency
+ceiling as the US**, confirming the headline finding generalises across markets:
+
+| Market | Model | OOS AUC | Edge vs B&H (5-day) |
+|--------|-------|--------:|--------------------:|
+| US  | XGBoost / LSTM (OOF) | ~0.515 | ≈ 0 |
+| EGX | XGBoost (OOF) | 0.506 | +0.01% |
+| EGX | LSTM (OOF) | 0.520 | +0.02% |
+
+**EGX reinforcement-learning agents — walk-forward robustness** (EGX-native PPO/A2C/DDPG/
+TD3/SAC retrained per window; 4 expanding windows: test 2022/2023/2024/2025; reduced
+timesteps). The benchmark (equal-weight buy & hold) was extreme and highly variable across
+the EGX bull market — **+42.7% / +150.9% / +26.9% / +29.0%** by window — making it a hard
+bar:
+
+| Algo | Beat B&H | Mean edge | Mean Sharpe |
+|------|:--------:|----------:|------------:|
+| **SAC** | **4/4** | **+17.7%** | 2.35 |
+| DDPG | 2/4 | −11.6% | 2.14 |
+| A2C  | 1/4 | −17.1% | 2.17 |
+| TD3  | 1/4 | −28.3% | 1.63 |
+| PPO  | 0/4 | −51.0% | 1.45 |
+
+**Reading.** A single-window backtest had crowned TD3 (+45%); the walk-forward shows that
+was regime luck (TD3 went 1/4). **Only SAC was consistent across all four years.** This is
+exactly why robustness was checked across windows rather than reported from one split.
+Caveats: reduced-timestep sweep (not production-scale), a single historical path, and an
+EGX bull market where buy & hold itself was very strong. EGX RL is therefore a *defensible
+but qualified* result, not raw alpha — consistent with the efficiency story.
+
+### 3.10 FinCast — foundation-model forecasting + contextual bandit
+
+Beyond the seven-model ensemble, the system integrates **FinCast**, a time-series
+**foundation model** (a TimesFM-derived patched-decoder transformer with a sparse
+**Mixture-of-Experts** layer, ~3.7 GB), adapted to finance with a **LoRA/DoRA** parameter-
+efficient adapter finetuned on **5-minute** bars. It is a fundamentally different approach
+from the directional classifiers above: it forecasts a full future *price path* (point +
+q10–q90 quantile band) over a 60-step horizon (= 5 trading hours), rather than a 5-day
+up/down label.
+
+**Trading via a contextual bandit (faithful to the FinCast research notebook).** Each
+window's forecast is discretised into a state — expected-return bin × forecast-spread
+(volatility/confidence) bin × short-term trend bin — and an ε-greedy bandit (α = 0.3,
+ε-decay 0.995) learns BUY/HOLD/SELL with **delayed reward** over the horizon. Train on the
+first 70% of windows, evaluate out-of-sample on the rest, 0.15% per-side cost. This is
+implemented in-app (`fincast_backtest_service.py`) and exposed on the Backtest page.
+
+**Out-of-sample results** (US, 5-minute bars, 60-day Yahoo window, 2000 windows/ticker;
+540 OOS trades each):
+
+| Ticker | OOS return | Sharpe | Max DD | Edge vs B&H |
+|--------|-----------:|-------:|-------:|------------:|
+| MSFT | +2.4% | 0.31 | −8.0% | **+5.6%** |
+| JPM  | 0.0% | 0.00 | 0.0% | **+1.3%** |
+| NVDA | −3.0% | −0.30 | −6.2% | −0.6% |
+| AAPL | −23.4% | −2.57 | −23.4% | −25.1% |
+| **Mean** | **−6.0%** | **−0.64** | — | beat B&H **2/4** |
+
+**Reading.** The result is **mixed and modest**, consistent with the efficiency-ceiling
+finding for the rest of the system. On two of four names the bandit beats buy & hold (MSFT
+materially; JPM by holding cash through a falling tape), and on those names drawdown is
+well-contained (the risk-managed HOLD behaviour). But it has no *consistent* edge across
+tickers, and on AAPL it traded poorly. The research notebook's single favourable case
+(PHDC, +8.3% / Sharpe 0.83 / −1.9% DD) is therefore not representative of broad
+performance — the same caution the in-sample/out-of-sample gap (§3.1) raises for the RL
+agents. **EGX FinCast could not be evaluated**: Yahoo provides no reliable 5-minute
+intraday data for `.CA` symbols, so the adapter's native frequency is unavailable for the
+Egyptian market (a data-source limitation, not a model one).
+
+**Contribution framing.** FinCast's value in this system is methodological — demonstrating
+that a modern pretrained foundation model with parameter-efficient finetuning *can* be
+integrated end-to-end behind the same decision/risk layer — and as a low-drawdown,
+quantile-aware forecaster, rather than as a source of raw alpha.
+
 ---
 
 ## 4. Discussion
@@ -282,6 +388,11 @@ that buys.
 - **Single historical path:** no block-bootstrap or combinatorial purged CV confidence
   intervals on the OOS returns (recommended future work).
 - **Survivorship:** the universe uses the *current* index constituents.
+- **Automated test coverage:** correctness rests on the six runtime leakage checks
+  (temporal boundary, no future-price columns, target exclusion, row-count sanity, causal
+  feature registry, backward-only construction) run on every fold, plus manual end-to-end
+  API verification. A formal `pytest` regression suite is not yet in place — recommended
+  future work to guard the data pipeline against regressions.
 
 ---
 
@@ -311,6 +422,10 @@ buy-and-hold benchmark over months, not on short-run P&L.
 - Kritzman et al. (2010). *Skulls, Financial Turbulence, and Risk Management.*
 - Platt, J. (1999). *Probabilistic Outputs for Support Vector Machines.*
 - López de Prado, M. (2018). *Advances in Financial Machine Learning.*
+- Das et al. (2024). *A decoder-only foundation model for time-series forecasting (TimesFM).* ICML.
+- Hu et al. (2021). *LoRA: Low-Rank Adaptation of Large Language Models.*
+- Liu et al. (2024). *DoRA: Weight-Decomposed Low-Rank Adaptation.*
+- Shazeer et al. (2017). *Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer.*
 
 ---
 
