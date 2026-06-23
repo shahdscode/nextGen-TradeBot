@@ -382,7 +382,7 @@ def _rl_holdings_timeseries(featured, algo, model_path, initial_cash):
 
 def run_meta_backtest(backtest_id, run, test_start, test_end,
                       initial_capital=1_000_000.0, commission_pct=0.001,
-                      slippage_pct=0.001) -> Dict[str, Any]:
+                      slippage_pct=0.001, tickers=None) -> Dict[str, Any]:
     """
     Real backtest of the meta-learner ensemble.
 
@@ -416,6 +416,12 @@ def run_meta_backtest(backtest_id, run, test_start, test_end,
     if win.empty:
         raise ValueError(f"No data for meta backtest window {test_start}…{test_end}")
     win["d"] = win["date"].dt.strftime("%Y-%m-%d")
+    # Optional ticker subset
+    if tickers:
+        want = {t.strip().upper() for t in tickers}
+        win = win[win["tic"].str.upper().isin(want)].copy()
+        if win.empty:
+            raise ValueError(f"None of the requested tickers {sorted(want)} are in the universe")
     dates = sorted(win["d"].unique())
     tics  = sorted(win["tic"].unique())
 
@@ -575,11 +581,16 @@ def run_backtest(
     slippage_pct: float    = 0.001,
     max_position_pct: float = 0.20,
     cooldown_days: int = 5,
+    tickers: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """
     Run backtest with all academic reality layers.
     Returns equity curve, extended metrics, 5 baselines, rolling walk-forward,
     3 stress tests, RL sanity checks, and overfitting report.
+
+    tickers: optional subset to backtest. Honored by the meta-learner path; RL
+    models are dimension-locked to their training universe so the subset is
+    ignored for them (the full universe is used).
     """
     db  = SessionLocal()
     run = db.query(Run).filter(Run.id == run_id).first()
@@ -592,7 +603,11 @@ def run_backtest(
     # instead of silently falling back to the synthetic engine.
     if (run.algorithm or "").lower() == "meta_learner":
         return run_meta_backtest(backtest_id, run, test_start, test_end,
-                                 initial_capital, commission_pct, slippage_pct)
+                                 initial_capital, commission_pct, slippage_pct,
+                                 tickers=tickers)
+    if tickers:
+        logger.info("Ticker subset %s ignored for RL run %s (dimension-locked to "
+                    "training universe)", tickers, run_id)
 
     data_path   = Path(settings.data_dir) / run.data_job_id / "data.csv"
     model_path  = run.model_path

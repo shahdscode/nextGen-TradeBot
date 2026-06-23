@@ -31,7 +31,7 @@ def create_backtest(req: BacktestRequest):
     backtest_task.delay(
         backtest_id, req.run_id, req.test_start, req.test_end,
         req.initial_capital, req.commission_pct, req.slippage_pct,
-        req.max_position_pct, req.cooldown_days,
+        req.max_position_pct, req.cooldown_days, req.tickers,
     )
     return BacktestResponse(backtest_id=backtest_id, run_id=req.run_id, status="pending",
                             initial_capital=req.initial_capital)

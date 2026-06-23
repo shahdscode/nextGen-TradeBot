@@ -16,6 +16,7 @@ def backtest_task(
     slippage_pct: float = 0.001,
     max_position_pct: float = 0.20,
     cooldown_days: int = 5,
+    tickers=None,
 ):
     db = SessionLocal()
     try:
@@ -34,6 +35,7 @@ def backtest_task(
             slippage_pct=slippage_pct,
             max_position_pct=max_position_pct,
             cooldown_days=cooldown_days,
+            tickers=tickers,
         )
 
         bt.status = "done"
