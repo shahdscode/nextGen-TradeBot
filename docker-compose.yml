@@ -36,7 +36,6 @@ services:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=sqlite:////data/finrl.db
       - DATA_DIR=/data/datasets
       - MODELS_DIR=/data/models
       - RESULTS_DIR=/data/results
@@ -63,7 +62,6 @@ services:
       - .env
     environment:
       - REDIS_URL=redis://redis:6379/0
-      - DATABASE_URL=sqlite:////data/finrl.db
       - DATA_DIR=/data/datasets
       - MODELS_DIR=/data/models
       - RESULTS_DIR=/data/results
