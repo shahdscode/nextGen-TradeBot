@@ -47,6 +47,15 @@ fi
 
 echo "=== Backend API (port $BACKEND_PORT) ==="
 cd "$ROOT/backend"
+# DB: use configured (Supabase) host if it resolves, else fall back to SQLite.
+DB_URL="$(grep -E '^DATABASE_URL=' "$ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')"
+if [[ "$DB_URL" == postgres* ]]; then
+  DB_HOST="$(printf '%s' "$DB_URL" | sed -E 's#.*@([^:/]+).*#\1#')"
+  if ! "$VENV/python" -c "import socket; socket.gethostbyname('$DB_HOST')" >/dev/null 2>&1; then
+    export DATABASE_URL="sqlite:///$ROOT/data/finrl.db"
+    echo "⚠ Database host $DB_HOST unreachable — falling back to local SQLite"
+  fi
+fi
 nohup "$VENV/uvicorn" app.main:app --host 0.0.0.0 --port "$BACKEND_PORT" \
   >"$LOG_DIR/backend.log" 2>&1 &
 echo $! >"$LOG_DIR/backend.pid"

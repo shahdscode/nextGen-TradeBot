@@ -3,5 +3,195 @@
 @tailwind utilities;
 
 body {
-  @apply bg-gray-50 text-gray-900 antialiased;
+  @apply bg-[#050810] text-gray-100 antialiased;
+}
+
+/* ── App shell — remap light-theme classes used across dashboard pages ─── */
+.app-shell .text-gray-900 { color: #fff !important; }
+.app-shell .text-gray-800 { color: #e5e7eb !important; }
+.app-shell .text-gray-700,
+.app-shell .text-gray-600 { color: #d1d5db !important; }
+.app-shell .text-green-600,
+.app-shell .text-green-700 { color: #34d399 !important; }
+.app-shell .text-blue-600,
+.app-shell .text-blue-700 { color: #2dd4bf !important; }
+.app-shell .text-red-600,
+.app-shell .text-red-700 { color: #f87171 !important; }
+
+/* Card / panel backgrounds */
+.app-shell .bg-white,
+.app-shell .bg-slate-50,
+.app-shell .bg-slate-100 {
+  background-color: rgba(17, 24, 39, 0.65) !important;
+  border-color: rgba(255, 255, 255, 0.1) !important;
+  backdrop-filter: blur(8px);
+}
+.app-shell .bg-gray-50 { background-color: rgba(255, 255, 255, 0.04) !important; }
+.app-shell .bg-gray-100 { background-color: rgba(255, 255, 255, 0.07) !important; }
+.app-shell .bg-green-50 { background-color: rgba(16, 185, 129, 0.12) !important; color: #6ee7b7 !important; }
+.app-shell .bg-blue-50 { background-color: rgba(6, 182, 212, 0.12) !important; color: #67e8f9 !important; }
+.app-shell .bg-red-50,
+.app-shell .bg-red-100 { background-color: rgba(239, 68, 68, 0.12) !important; color: #fca5a5 !important; }
+.app-shell .bg-teal-50 { background-color: rgba(20, 184, 166, 0.12) !important; color: #5eead4 !important; }
+.app-shell .bg-violet-50 { background-color: rgba(139, 92, 246, 0.12) !important; }
+.app-shell .bg-indigo-50 { background-color: rgba(99, 102, 241, 0.12) !important; }
+.app-shell .bg-emerald-50 { background-color: rgba(16, 185, 129, 0.12) !important; }
+
+.app-shell .border-gray-200,
+.app-shell .border-gray-100,
+.app-shell .border-gray-300,
+.app-shell .border-slate-200,
+.app-shell .border-blue-100,
+.app-shell .border-violet-200,
+.app-shell .border-emerald-200,
+.app-shell .border-indigo-200,
+.app-shell .border-green-200 { border-color: rgba(255, 255, 255, 0.1) !important; }
+
+.app-shell .divide-gray-100 > :not([hidden]) ~ :not([hidden]) {
+  border-color: rgba(255, 255, 255, 0.06) !important;
+}
+.app-shell .hover\:bg-gray-50:hover,
+.app-shell tr.hover\:bg-gray-50:hover,
+.app-shell .hover\:bg-gray-200:hover { background-color: rgba(255, 255, 255, 0.06) !important; }
+
+.app-shell thead.bg-gray-50,
+.app-shell tr.bg-gray-50 { background-color: rgba(255, 255, 255, 0.05) !important; }
+
+.app-shell input:not([type="checkbox"]):not([type="radio"]),
+.app-shell select,
+.app-shell textarea {
+  @apply bg-gray-900/80 border-white/10 text-white placeholder:text-gray-500
+         focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500/40;
+}
+
+.app-shell select option {
+  background-color: #111827;
+  color: #f3f4f6;
+}
+
+.app-shell code.bg-white {
+  background-color: rgba(0, 0, 0, 0.35) !important;
+  color: #e5e7eb !important;
+}
+
+.app-shell a.bg-gray-900,
+.app-shell button.bg-gray-900 {
+  @apply bg-teal-600 hover:bg-teal-500 shadow-lg shadow-teal-600/20;
+}
+
+/* Recharts */
+.app-shell .recharts-default-tooltip {
+  background-color: rgba(17, 24, 39, 0.95) !important;
+  border: 1px solid rgba(255, 255, 255, 0.12) !important;
+  border-radius: 8px !important;
+  color: #e5e7eb !important;
+}
+.app-shell .recharts-tooltip-label,
+.app-shell .recharts-tooltip-item {
+  color: #e5e7eb !important;
+}
+.app-shell .recharts-legend-item-text {
+  color: #9ca3af !important;
+}
+.app-shell .recharts-cartesian-grid-horizontal line,
+.app-shell .recharts-cartesian-grid-vertical line {
+  stroke: rgba(255, 255, 255, 0.08) !important;
+}
+.app-shell .recharts-text {
+  fill: #9ca3af !important;
+}
+
+/* ── Landing page animations ─────────────────────────────────────────────── */
+.landing-bg {
+  position: fixed;
+  inset: 0;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.landing-orb {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(80px);
+  opacity: 0.45;
+  animation: orbDrift 18s ease-in-out infinite;
+}
+
+.landing-orb-1 {
+  width: 420px;
+  height: 420px;
+  background: radial-gradient(circle, rgba(20, 184, 166, 0.35), transparent 70%);
+  top: -120px;
+  left: -80px;
+}
+
+.landing-orb-2 {
+  width: 360px;
+  height: 360px;
+  background: radial-gradient(circle, rgba(6, 182, 212, 0.25), transparent 70%);
+  top: 40%;
+  right: -100px;
+  animation-delay: -6s;
+}
+
+.landing-orb-3 {
+  width: 280px;
+  height: 280px;
+  background: radial-gradient(circle, rgba(16, 185, 129, 0.2), transparent 70%);
+  bottom: 10%;
+  left: 30%;
+  animation-delay: -12s;
+}
+
+.landing-grid {
+  position: absolute;
+  inset: 0;
+  background-image:
+    linear-gradient(rgba(255, 255, 255, 0.03) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255, 255, 255, 0.03) 1px, transparent 1px);
+  background-size: 64px 64px;
+  mask-image: radial-gradient(ellipse at center, black 20%, transparent 75%);
+}
+
+.landing-fade-up {
+  animation: fadeUp 0.7s ease-out both;
+}
+
+.landing-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+.landing-ticker {
+  animation: ticker 28s linear infinite;
+  width: max-content;
+}
+
+.landing-bar-fill {
+  animation: barFill 1.4s ease-out 0.6s both;
+}
+
+.landing-glow {
+  animation: glow 4s ease-in-out infinite;
+}
+
+.landing-pipeline-step {
+  animation: fadeUp 0.6s ease-out both;
+}
+
+@keyframes orbDrift {
+  0%, 100% { transform: translate(0, 0) scale(1); }
+  33% { transform: translate(30px, -20px) scale(1.05); }
+  66% { transform: translate(-20px, 15px) scale(0.95); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .landing-orb,
+  .landing-fade-up,
+  .landing-float,
+  .landing-ticker,
+  .landing-bar-fill,
+  .landing-glow,
+  .landing-pipeline-step {
+    animation: none !important;
+  }
 }

@@ -68,6 +68,9 @@ class BacktestRequest(BaseModel):
     run_id: str
     test_start: str
     test_end: str
+    # Optional ticker subset (meta-learner backtests only; RL models are
+    # dimension-locked to their training universe and use the full set).
+    tickers: Optional[List[str]] = None
     initial_capital: float = 1_000_000.0
     # Trading friction
     commission_pct: float = 0.001   # 0.1% per trade

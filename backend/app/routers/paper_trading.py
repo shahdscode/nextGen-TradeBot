@@ -71,6 +71,7 @@ def _row_to_dict(row: PaperSession) -> dict[str, Any]:
         "initial_cash": row.initial_cash,
         "cash":         row.cash,
         "positions":    row.positions or {},
+        "auto_enabled": bool(getattr(row, "auto_enabled", False)),
         "started_at":   row.started_at.isoformat() if row.started_at else None,
         "stopped_at":   row.stopped_at.isoformat() if row.stopped_at else None,
     }
@@ -91,6 +92,7 @@ def _save_session(s: dict[str, Any]) -> PaperSession:
         row.cash         = s.get("cash", 100_000.0)
         row.positions    = s.get("positions", {})
         row.running      = s.get("running", False)
+        row.auto_enabled = s.get("auto_enabled", False)
         row.started_at   = (
             datetime.fromisoformat(s["started_at"])
             if isinstance(s.get("started_at"), str)
@@ -126,6 +128,7 @@ def _get_session() -> dict[str, Any]:
                 "initial_cash": 100_000.0,
                 "cash":         100_000.0,
                 "positions":    {},
+                "auto_enabled": False,
                 "started_at":   None,
                 "stopped_at":   None,
             }
@@ -252,6 +255,7 @@ def get_status():
         "symbols":     s["symbols"],
         "timeframe":   s["timeframe"],
         "session_id":  s["session_id"],
+        "auto_enabled": s.get("auto_enabled", False),
     }
 
 
@@ -497,6 +501,60 @@ def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
         "stopped_out":    stopped_out,
         "signals":        alloc["signals"],
     }
+
+
+@router.post("/suggest")
+def suggest(market: str = "us", tickers: str | None = None):
+    """
+    Advisory ("helping") mode: compute the model's recommended actions WITHOUT
+    executing. Returns per-ticker BUY/HOLD/SELL, target weights, regime, and any
+    risk flags so the user can review and decide. Nothing is applied to the session.
+    """
+    from app.services.live_trading_service import generate_meta_allocation
+
+    s = _get_session()
+    cash = float(s.get("initial_cash") or 100_000.0)
+    market = (market or "us").lower()
+    ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()] if tickers else None
+
+    alloc = generate_meta_allocation(cash, market=market, tickers=ticker_list)
+    if not alloc.get("ok"):
+        raise HTTPException(status_code=400, detail=alloc.get("message", "allocation failed"))
+
+    # Names currently held that breach the stop-loss → flagged as suggested exits
+    stopped_out = _stopped_out_positions(s)
+
+    # Build a ranked recommendation list (BUY first, by target dollar weight)
+    prices = alloc.get("prices", {})
+    target = alloc.get("target", {})
+    total = sum((target.get(t, 0.0) * prices.get(t, 0.0)) for t in alloc["tickers"]) or 1.0
+    recs = []
+    for t in alloc["tickers"]:
+        weight = (target.get(t, 0.0) * prices.get(t, 0.0)) / total
+        recs.append({"ticker": t, "action": alloc["signals"].get(t, "HOLD"),
+                     "target_weight": round(weight, 4),
+                     "stop_loss": t in stopped_out})
+    recs.sort(key=lambda r: (r["action"] != "BUY", -r["target_weight"]))
+
+    return {
+        "ok": True, "mode": "advisory", "as_of": alloc["as_of"], "market": market,
+        "regime": alloc.get("regime"), "defensive": alloc.get("defensive", False),
+        "message": alloc["message"], "stopped_out": stopped_out,
+        "recommendations": recs,
+        "note": "Advisory only — nothing was executed. Use Rebalance to apply.",
+    }
+
+
+@router.post("/auto")
+def set_auto(enabled: bool):
+    """Enable/disable automated scheduler rebalancing for the active session."""
+    global _SESSION_CACHE
+    s = _get_session()
+    s["auto_enabled"] = bool(enabled)
+    s.setdefault("session_id", str(uuid.uuid4()))
+    _SESSION_CACHE = s
+    _save_session(s)
+    return {"ok": True, "auto_enabled": s["auto_enabled"], "session_id": s["session_id"]}
 
 
 @router.get("/alpaca/status")

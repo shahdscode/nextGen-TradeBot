@@ -244,7 +244,8 @@ def _submit_notional(symbol: str, notional: float, side: str) -> Optional[dict]:
 
 def rebalance_to_weights(target_weights: Dict[str, float],
                          min_trade_dollars: float = 50.0,
-                         cash_buffer_pct: float = 0.02) -> Dict[str, Any]:
+                         cash_buffer_pct: float = 0.02,
+                         rebalance_band: float = 0.03) -> Dict[str, Any]:
     """
     Rebalance the Alpaca paper account toward target weights (sum ≤ 1 of equity).
 
@@ -252,21 +253,27 @@ def rebalance_to_weights(target_weights: Dict[str, float],
     between calculation and fill can't push the account into negative cash /
     margin. Targets are scaled to (1 - buffer) of equity.
 
+    No-trade band: a symbol is only traded if its weight drifts from target by
+    more than `rebalance_band` (default 3%) of equity — this adds portfolio
+    inertia and cuts churn/transaction drag from small signal noise.
+
     Computes per-symbol dollar deltas vs current positions and submits market
     orders (notional). Symbols not in target_weights are flattened (sold).
     Returns the submitted orders + resulting account snapshot.
     """
-    acct   = get_account()
+    acct       = get_account()
+    full_equity = acct["equity"]
     # Deploy only (1 - buffer) of equity so we never overdraw cash on fills.
-    equity = acct["equity"] * (1.0 - max(0.0, min(cash_buffer_pct, 0.5)))
+    equity = full_equity * (1.0 - max(0.0, min(cash_buffer_pct, 0.5)))
     positions = {p["symbol"]: p for p in get_positions()}
 
     # Current $ per symbol
     cur_val = {s: p["market_value"] for s, p in positions.items()}
     symbols = set(target_weights) | set(cur_val)
 
-    orders, skipped = [], []
+    orders, skipped, held = [], [], []
     is_open = market_is_open()
+    band_dollars = rebalance_band * full_equity   # weight-drift no-trade zone
 
     # Sells first (free up buying power), then buys
     deltas = {}
@@ -277,7 +284,10 @@ def rebalance_to_weights(target_weights: Dict[str, float],
 
     for s in sorted(symbols, key=lambda x: deltas[x]):   # sells (neg) first
         d = deltas[s]
-        if abs(d) < min_trade_dollars:
+        # No-trade band: skip small drifts unless we're fully exiting the name.
+        fully_exiting = target_weights.get(s, 0.0) == 0.0 and s in positions
+        if abs(d) < max(min_trade_dollars, band_dollars) and not fully_exiting:
+            held.append(s)
             continue
         side = "buy" if d > 0 else "sell"
         # When fully exiting, close the position to avoid leftover fractional dust
@@ -301,6 +311,7 @@ def rebalance_to_weights(target_weights: Dict[str, float],
         "orders":        orders,
         "skipped":       skipped,
         "n_orders":      len(orders),
+        "held_in_band":  len(held),   # within no-trade band — left untouched
         "note": ("Orders submitted; they fill at the next market open."
                  if not is_open else "Orders submitted to live paper market."),
         "account":       get_account(),

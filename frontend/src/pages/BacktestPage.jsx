@@ -818,6 +818,7 @@ export default function BacktestPage() {
   const [selectedRunId, setSelectedRunId] = useState(searchParams.get('run_id') || '')
   const [testStart, setTestStart]         = useState('2024-01-01')
   const [testEnd, setTestEnd]             = useState('2025-12-31')
+  const [tickers, setTickers]             = useState('')   // optional CSV subset
   const [presets, setPresets]             = useState({})
   const [initialCapital, setInitialCapital] = useState('100000')
   // Friction controls
@@ -867,10 +868,14 @@ export default function BacktestPage() {
     setResult(null)
     setSubmitting(true)
     try {
+      const tickerList = tickers.trim()
+        ? tickers.split(',').map((t) => t.trim().toUpperCase()).filter(Boolean)
+        : null
       const r = await client.post('/api/backtest', {
         run_id: selectedRunId,
         test_start: testStart,
         test_end: testEnd,
+        tickers: tickerList,
         initial_capital: capital,
         commission_pct: parseFloat(commissionPct) / 100,
         slippage_pct:   parseFloat(slippagePct)   / 100,
@@ -961,6 +966,21 @@ export default function BacktestPage() {
                 <button key={v} onClick={() => setInitialCapital(String(v))}
                   className="text-blue-600 hover:underline mr-2">${v.toLocaleString()}</button>
               ))}
+            </p>
+          </div>
+
+          {/* Ticker subset */}
+          <div className="sm:col-span-2">
+            <label className="block text-sm font-medium text-gray-700 mb-1">
+              Tickers <span className="text-gray-400 font-normal">(optional — leave blank for all)</span>
+            </label>
+            <input type="text" value={tickers} onChange={(e) => setTickers(e.target.value)}
+              placeholder="e.g. AAPL, MSFT, JPM"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none" />
+            <p className="text-xs text-gray-400 mt-1">
+              {selectedRun && selectedRun.algorithm !== 'meta_learner'
+                ? '⚠ RL models are locked to their training universe — the subset is ignored for this run.'
+                : 'Applies to meta-learner backtests. Comma-separated.'}
             </p>
           </div>
 

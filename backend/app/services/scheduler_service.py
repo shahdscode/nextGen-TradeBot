@@ -101,6 +101,9 @@ def _run_weekly_rebalance():
         if not row:
             logger.info("Weekly rebalance: no active paper session — skipping")
             return
+        if not getattr(row, "auto_enabled", False):
+            logger.info("Weekly rebalance: session auto-trade disabled — skipping")
+            return
         cash = float(row.initial_cash or 100_000.0)
         run_id = row.run_id or ""
         # Use Alpaca equity as the budget when available

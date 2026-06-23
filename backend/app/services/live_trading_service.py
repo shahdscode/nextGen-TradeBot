@@ -187,7 +187,8 @@ def _rl_holdings(featured: pd.DataFrame, algo: str, model_path: str,
 
 def generate_meta_allocation(initial_cash: float = 100_000.0,
                              market: str = "us",
-                             tickers: Optional[List[str]] = None) -> Dict[str, Any]:
+                             tickers: Optional[List[str]] = None,
+                             top_k: int = 10) -> Dict[str, Any]:
     """
     Full meta-learner allocation on live data for a market (US or EGX).
 
@@ -313,6 +314,11 @@ def generate_meta_allocation(initial_cash: float = 100_000.0,
         # ── Allocate ∝ meta probability among BUY stocks (prob > 0.5) ────────
         latest_close = dict(zip(latest["tic"], latest["close"].astype(float)))
         buys = {} if defensive else {t: p for t, p in meta_prob.items() if p > 0.5}
+        # Top-K cap: concentrate capital in the highest-conviction names instead of
+        # spreading thinly across the whole universe (reduces over-diversification,
+        # signal noise, and rebalance churn).
+        if top_k and len(buys) > top_k:
+            buys = dict(sorted(buys.items(), key=lambda kv: kv[1], reverse=True)[:top_k])
         wsum = sum(buys.values())
         target, prices, signals = {}, {}, {}
         for t in tics:

@@ -22,6 +22,18 @@ if lsof -ti ":$PORT" >/dev/null 2>&1; then
 fi
 
 cd "$ROOT/backend"
+# DB: use the configured (Supabase) DATABASE_URL if its host resolves; otherwise
+# fall back to local SQLite so offline dev / mobile / demos still work.
+DB_URL="$(grep -E '^DATABASE_URL=' "$ROOT/.env" 2>/dev/null | head -1 | cut -d= -f2- | tr -d '"')"
+if [[ "$DB_URL" == postgres* ]]; then
+  DB_HOST="$(printf '%s' "$DB_URL" | sed -E 's#.*@([^:/]+).*#\1#')"
+  if "$VENV/python" -c "import socket; socket.gethostbyname('$DB_HOST')" >/dev/null 2>&1; then
+    echo "Database: using configured host ($DB_HOST)"
+  else
+    export DATABASE_URL="sqlite:///$ROOT/data/finrl.db"
+    echo "⚠ Database host $DB_HOST unreachable — falling back to local SQLite"
+  fi
+fi
 nohup "$VENV/uvicorn" app.main:app --host 0.0.0.0 --port "$PORT" \
   >"$LOG_DIR/backend.log" 2>&1 &
 echo $! >"$LOG_DIR/backend.pid"

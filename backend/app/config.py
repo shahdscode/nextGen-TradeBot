@@ -20,7 +20,13 @@ class Settings(BaseSettings):
     # same DB regardless of working directory. Previously relative ('./finrl.db')
     # which silently created a second DB under backend/ that diverged from the
     # project-root data/finrl.db used by the training scripts.
+    # SQLite for local dev; Supabase/PostgreSQL for hosted production.
+    # Supabase (pooler, recommended):
+    #   DATABASE_URL=postgresql://postgres.[ref]:[password]@aws-0-[region].pooler.supabase.com:6543/postgres
     database_url: str = f"sqlite:///{_PROJECT_ROOT / 'data' / 'finrl.db'}"
+    database_ssl_mode: str = "require"       # Supabase requires SSL; use "disable" for local Postgres
+    database_pool_size: int = 5
+    database_max_overflow: int = 10
     data_dir: str = str(_PROJECT_ROOT / "data" / "datasets")
     models_dir: str = str(_PROJECT_ROOT / "data" / "models")
     results_dir: str = str(_PROJECT_ROOT / "data" / "results")

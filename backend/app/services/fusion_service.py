@@ -233,12 +233,16 @@ def build_signal_card(
     confidence = fused["confidence"]
     band = market_thresholds(market)
 
-    if guardrails["suppressed"] or fused.get("turbulence_suppressed"):
-        action = "SUPPRESSED"
+    # Action bands are evaluated before the suppress flag so bearish conviction
+    # (confidence <= sell) surfaces as SELL instead of being hidden as SUPPRESSED.
+    if fused.get("turbulence_suppressed"):
+        action = "HOLD"
     elif confidence >= band["buy"]:
         action = "BUY"
     elif confidence <= band["sell"]:
         action = "SELL"
+    elif guardrails["suppressed"]:
+        action = "SUPPRESSED"
     else:
         action = "HOLD"
 

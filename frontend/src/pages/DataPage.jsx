@@ -4,6 +4,7 @@ import toast from 'react-hot-toast'
 import client from '../api/client'
 import JobStatusBadge from '../components/JobStatusBadge'
 import { CardSkeleton, TableSkeleton } from '../components/Skeleton'
+import { darkSelectStyles } from '../selectTheme'
 
 const sourceOptions = [
   { value: 'yahoo', label: 'Yahoo Finance — US (S&P 500, ETFs, indices)' },
@@ -246,6 +247,8 @@ export default function DataPage() {
             value={source}
             onChange={setSource}
             className="text-sm"
+            styles={darkSelectStyles}
+            classNamePrefix="app-select"
           />
         </div>
 
@@ -258,6 +261,8 @@ export default function DataPage() {
             onChange={(opts) => setSelectedTickers(opts || [])}
             placeholder="Search tickers for this source..."
             className="text-sm"
+            styles={darkSelectStyles}
+            classNamePrefix="app-select"
             noOptionsMessage={() => 'No symbols for this data source'}
           />
           {activeCatalog?.note && (
@@ -292,7 +297,7 @@ export default function DataPage() {
               type="date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-gray-900/80 text-white focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500/40"
             />
           </div>
           <div>
@@ -301,7 +306,7 @@ export default function DataPage() {
               type="date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
-              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+              className="w-full border border-gray-300 rounded-lg px-3 py-2 text-sm bg-gray-900/80 text-white focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500/40"
             />
           </div>
         </div>
@@ -314,6 +319,8 @@ export default function DataPage() {
               value={mt5Timeframe}
               onChange={setMt5Timeframe}
               className="text-sm"
+              styles={darkSelectStyles}
+              classNamePrefix="app-select"
             />
             <p className="text-xs text-gray-500 mt-1">Use MT5 symbol names from the list above.</p>
           </div>
