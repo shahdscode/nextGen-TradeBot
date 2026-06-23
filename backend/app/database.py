@@ -1,14 +1,40 @@
-from sqlalchemy import create_engine, Column, String, DateTime, JSON, Float, Text, Boolean, Integer
+from sqlalchemy import create_engine, Column, String, DateTime, JSON, Float, Text, Boolean, Integer, inspect, text
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
-from sqlalchemy import text
 from datetime import datetime
 from app.config import settings
 
-engine = create_engine(
-    settings.database_url,
-    connect_args={"check_same_thread": False}
-)
+
+def _normalize_database_url(url: str) -> str:
+    """Normalize Supabase/Heroku-style URLs for SQLAlchemy + psycopg2."""
+    if url.startswith("postgres://"):
+        return url.replace("postgres://", "postgresql+psycopg2://", 1)
+    if url.startswith("postgresql://") and "+psycopg2" not in url and "+asyncpg" not in url:
+        return url.replace("postgresql://", "postgresql+psycopg2://", 1)
+    return url
+
+
+def _build_engine():
+    url = _normalize_database_url(settings.database_url)
+    is_sqlite = url.startswith("sqlite")
+
+    if is_sqlite:
+        return create_engine(url, connect_args={"check_same_thread": False})
+
+    connect_args = {}
+    if "supabase.co" in url or "supabase.com" in url:
+        connect_args["sslmode"] = settings.database_ssl_mode or "require"
+
+    return create_engine(
+        url,
+        pool_pre_ping=True,
+        pool_size=settings.database_pool_size,
+        max_overflow=settings.database_max_overflow,
+        connect_args=connect_args,
+    )
+
+
+engine = _build_engine()
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
@@ -19,6 +45,14 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def is_sqlite() -> bool:
+    return engine.dialect.name == "sqlite"
+
+
+def is_postgres() -> bool:
+    return engine.dialect.name == "postgresql"
 
 
 class User(Base):
@@ -117,6 +151,7 @@ class PaperSession(Base):
     cash = Column(Float, default=100_000.0)
     positions = Column(JSON, default=dict)   # {symbol: {qty, entry_price}}
     running = Column(Boolean, default=False)
+    auto_enabled = Column(Boolean, default=False)  # scheduler auto-rebalances if True
     started_at = Column(DateTime, nullable=True)
     stopped_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -141,23 +176,57 @@ class ModelPerformanceScore(Base):
     created_at   = Column(DateTime, default=datetime.utcnow)
 
 
-def _add_column_if_missing(conn, table: str, col_def: str):
+_LEGACY_MIGRATIONS = [
+    ("users", "alpaca_api_key TEXT"),
+    ("users", "alpaca_api_secret TEXT"),
+    ("runs", "model_type TEXT DEFAULT 'rl'"),
+    ("runs", "published BOOLEAN DEFAULT FALSE"),
+    ("runs", "market TEXT DEFAULT 'us'"),
+    ("backtests", "initial_capital DOUBLE PRECISION DEFAULT 1000000.0"),
+    ("paper_sessions", "auto_enabled BOOLEAN DEFAULT FALSE"),
+]
+
+_LEGACY_MIGRATIONS_SQLITE = [
+    ("users", "alpaca_api_key TEXT"),
+    ("users", "alpaca_api_secret TEXT"),
+    ("runs", "model_type TEXT DEFAULT 'rl'"),
+    ("runs", "published INTEGER DEFAULT 0"),
+    ("runs", "market TEXT DEFAULT 'us'"),
+    ("backtests", "initial_capital REAL DEFAULT 1000000.0"),
+    ("paper_sessions", "auto_enabled INTEGER DEFAULT 0"),
+]
+
+
+def _column_exists(conn, table: str, column: str) -> bool:
+    inspector = inspect(conn)
     try:
-        conn.execute(text(f"ALTER TABLE {table} ADD COLUMN {col_def}"))
+        cols = {c["name"] for c in inspector.get_columns(table)}
+    except Exception:
+        return False
+    return column in cols
+
+
+def _add_column_if_missing(conn, table: str, col_def: str):
+    column = col_def.split()[0]
+    if _column_exists(conn, table, column):
+        return
+
+    if is_postgres():
+        stmt = f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col_def}"
+    else:
+        stmt = f"ALTER TABLE {table} ADD COLUMN {col_def}"
+
+    try:
+        conn.execute(text(stmt))
         conn.commit()
     except Exception:
-        pass
+        conn.rollback()
 
 
 def create_tables():
     Base.metadata.create_all(bind=engine)
-    # Migrate existing tables with new columns (SQLite does not support ADD COLUMN IF NOT EXISTS)
+    migrations = _LEGACY_MIGRATIONS_SQLITE if is_sqlite() else _LEGACY_MIGRATIONS
     with engine.connect() as conn:
-        _add_column_if_missing(conn, "users", "alpaca_api_key TEXT")
-        _add_column_if_missing(conn, "users", "alpaca_api_secret TEXT")
-        _add_column_if_missing(conn, "runs", "model_type TEXT DEFAULT 'rl'")
-        _add_column_if_missing(conn, "runs", "published INTEGER DEFAULT 0")
-        _add_column_if_missing(conn, "runs", "market TEXT DEFAULT 'us'")
-        _add_column_if_missing(conn, "backtests", "initial_capital REAL DEFAULT 1000000.0")
-    # NEW: model_performance_scores table (created via create_all above if missing)
+        for table, col_def in migrations:
+            _add_column_if_missing(conn, table, col_def)
     ModelPerformanceScore.__table__.create(bind=engine, checkfirst=True)
