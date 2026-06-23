@@ -118,9 +118,13 @@ export default function SignalsPage() {
           {Array.from({ length: 6 }).map((_, i) => <CardSkeleton key={i} />)}
         </div>
       ) : filtered.length === 0 ? (
-        <div className="text-center py-20 bg-gray-50 rounded-2xl border border-gray-100">
-          <p className="text-gray-400">No signals available yet.</p>
-          <p className="text-sm text-gray-400 mt-1">An admin needs to generate signals first.</p>
+        <div className="text-center py-20 rounded-2xl border border-white/10 bg-gray-900/40">
+          <p className="text-gray-400">No {actionFilter || ''} signals in the last 48 hours.</p>
+          <p className="text-sm text-gray-500 mt-1">
+            {actionFilter === 'SELL'
+              ? 'SELL appears when fused confidence ≤ 44%. Regenerate signals after the backend fix, or try All Markets.'
+              : 'An admin needs to generate signals first (Publish page).'}
+          </p>
         </div>
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">

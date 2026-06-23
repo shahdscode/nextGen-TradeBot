@@ -3,6 +3,7 @@ import {
   Tooltip, Legend, ResponsiveContainer, ReferenceLine,
   Scatter, ScatterChart,
 } from 'recharts'
+import { CHART_GRID_STROKE, CHART_TICK_FILL } from '../chartTheme'
 
 const agentColors = ['#2563eb', '#16a34a', '#dc2626', '#d97706']
 
@@ -40,13 +41,13 @@ const CustomTooltip = ({ active, payload, label }) => {
   if (!active || !payload?.length) return null
   return (
     <div style={{
-      background: 'var(--color-background-primary)',
-      border: '0.5px solid var(--color-border-secondary)',
+      background: 'rgba(17, 24, 39, 0.95)',
+      border: '1px solid rgba(255, 255, 255, 0.12)',
       borderRadius: 8,
       padding: '10px 14px',
       fontSize: 12,
     }}>
-      <p style={{ color: 'var(--color-text-secondary)', marginBottom: 6 }}>{label}</p>
+      <p style={{ color: '#9ca3af', marginBottom: 6 }}>{label}</p>
       {payload.map((p) => (
         p.value != null && (
           <div key={p.name} style={{ display: 'flex', justifyContent: 'space-between', gap: 16, color: p.color }}>
@@ -157,21 +158,21 @@ export default function EquityCurveChart({ curves = [], benchmark = null, showTr
 
       <ResponsiveContainer width="100%" height={320}>
         <ComposedChart data={data} margin={{ top: 4, right: 16, left: 0, bottom: 0 }}>
-          <CartesianGrid strokeDasharray="3 3" stroke="#f0f0f0" />
+          <CartesianGrid strokeDasharray="3 3" stroke={CHART_GRID_STROKE} />
           <XAxis
             dataKey="date"
-            tick={{ fontSize: 11 }}
+            tick={{ fontSize: 11, fill: CHART_TICK_FILL }}
             tickLine={false}
             interval={tickInterval}
           />
           <YAxis
-            tick={{ fontSize: 11 }}
+            tick={{ fontSize: 11, fill: CHART_TICK_FILL }}
             tickLine={false}
             axisLine={false}
             tickFormatter={(v) => `${v}%`}
           />
           <Tooltip content={<CustomTooltip />} />
-          <Legend wrapperStyle={{ fontSize: 12 }} />
+          <Legend wrapperStyle={{ fontSize: 12, color: '#9ca3af' }} />
 
           {/* Agent equity curves */}
           {curves.map((c, i) => (

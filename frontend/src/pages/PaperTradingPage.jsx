@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react'
 import { LineChart, Line, ResponsiveContainer, YAxis, Tooltip } from 'recharts'
 import client from '../api/client'
 import { CardSkeleton } from '../components/Skeleton'
+import { CHART_TOOLTIP_STYLE } from '../chartTheme'
 
 export default function PaperTradingPage() {
   const [loading, setLoading] = useState(true)
@@ -20,9 +21,33 @@ export default function PaperTradingPage() {
   const [simTickers, setSimTickers] = useState('')   // optional CSV subset
   const [simResult, setSimResult] = useState(null)
   const [simPf, setSimPf] = useState(null)
+  const [suggestions, setSuggestions] = useState(null)   // advisory mode
+  const [autoEnabled, setAutoEnabled] = useState(false)  // automated mode
 
-  const refreshSim = () =>
-    client.get('/api/paper-trading/portfolio').then(r => setSimPf(r.data)).catch(() => {})
+  const refreshSim = () => Promise.all([
+    client.get('/api/paper-trading/portfolio').then(r => setSimPf(r.data)).catch(() => {}),
+    client.get('/api/paper-trading/status').then(r => setAutoEnabled(!!r.data.auto_enabled)).catch(() => {}),
+  ])
+
+  const handleSuggest = async () => {
+    setBusy(true); setSuggestions(null)
+    try {
+      const params = { market: simMarket }
+      if (simTickers.trim()) params.tickers = simTickers.trim()
+      const r = await client.post('/api/paper-trading/suggest', null, { params })
+      setSuggestions(r.data)
+    } catch (e) {
+      setSuggestions({ ok: false, note: e.response?.data?.detail || 'Suggestion failed' })
+    } finally { setBusy(false) }
+  }
+
+  const toggleAuto = async () => {
+    const next = !autoEnabled
+    try {
+      await client.post('/api/paper-trading/auto', null, { params: { enabled: next } })
+      setAutoEnabled(next)
+    } catch (e) { /* ignore */ }
+  }
 
   const handleSimRebalance = async () => {
     setBusy(true); setSimResult(null)
@@ -101,11 +126,47 @@ export default function PaperTradingPage() {
           <input value={simTickers} onChange={e => setSimTickers(e.target.value)}
             placeholder={simMarket === 'egx' ? 'COMI.CA, HRHO.CA (optional)' : 'AAPL, MSFT (optional)'}
             className="border border-gray-300 rounded-lg px-3 py-2 text-sm flex-1 min-w-[180px]" />
+          <button onClick={handleSuggest} disabled={busy}
+            className="px-4 py-2 text-sm rounded-lg border border-indigo-300 text-indigo-700 hover:bg-indigo-50 disabled:opacity-50">
+            {busy ? 'Working…' : 'Suggest (review)'}
+          </button>
           <button onClick={handleSimRebalance} disabled={busy}
             className="px-4 py-2 text-sm rounded-lg bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50">
-            {busy ? 'Running…' : 'Rebalance'}
+            {busy ? 'Running…' : 'Rebalance (execute)'}
+          </button>
+          <button onClick={toggleAuto}
+            className={`px-3 py-2 text-sm rounded-lg border ${autoEnabled
+              ? 'bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-700'
+              : 'border-gray-300 text-gray-600 hover:bg-gray-50'}`}>
+            Auto-trade: {autoEnabled ? 'ON' : 'OFF'}
           </button>
         </div>
+        {autoEnabled && (
+          <p className="text-[11px] text-emerald-700 mb-2">
+            Automated: the scheduler will rebalance this session weekly with the same risk controls.
+          </p>
+        )}
+        {suggestions && (
+          <div className={`text-xs rounded-lg p-3 mb-2 ${suggestions.ok ? 'bg-violet-50' : 'bg-red-50 text-red-700'}`}>
+            {suggestions.ok ? (
+              <>
+                <div className="font-medium text-violet-800 mb-1">
+                  Advisory · {suggestions.regime} regime — review and click Rebalance to apply
+                </div>
+                <div className="flex flex-wrap gap-1.5">
+                  {suggestions.recommendations.map((r) => (
+                    <span key={r.ticker} className={`px-2 py-0.5 rounded border text-[11px] ${
+                      r.action === 'BUY' ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
+                      : r.action === 'SELL' ? 'bg-red-100 text-red-700 border-red-200'
+                      : 'bg-gray-100 text-gray-600 border-gray-200'}`}>
+                      {r.ticker} {r.action}{r.target_weight > 0 ? ` ${(r.target_weight * 100).toFixed(0)}%` : ''}{r.stop_loss ? ' ⛔' : ''}
+                    </span>
+                  ))}
+                </div>
+              </>
+            ) : `✗ ${suggestions.note}`}
+          </div>
+        )}
         {simResult && (
           <div className={`text-xs rounded-lg p-3 mb-2 ${simResult.ok ? 'bg-indigo-50 text-indigo-800' : 'bg-red-50 text-red-700'}`}>
             {simResult.ok ? (
@@ -243,8 +304,11 @@ export default function PaperTradingPage() {
             <ResponsiveContainer width="100%" height={140}>
               <LineChart data={alpacaPf.equity_curve.map((v, i) => ({ i, equity: v }))}>
                 <YAxis domain={['dataMin', 'dataMax']} hide />
-                <Tooltip formatter={(v) => `$${Number(v).toLocaleString(undefined,{maximumFractionDigits:0})}`}
-                         labelFormatter={() => ''} />
+                <Tooltip
+                  formatter={(v) => `$${Number(v).toLocaleString(undefined,{maximumFractionDigits:0})}`}
+                  labelFormatter={() => ''}
+                  contentStyle={CHART_TOOLTIP_STYLE}
+                />
                 <Line type="monotone" dataKey="equity" stroke="#059669" strokeWidth={2} dot={false} />
               </LineChart>
             </ResponsiveContainer>

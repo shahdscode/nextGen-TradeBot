@@ -4,7 +4,8 @@ import Layout from './components/Layout'
 import ErrorBoundary from './components/ErrorBoundary'
 import ProtectedRoute from './components/protectedRoute'
 
-// Auth
+// Public
+import LandingPage from './pages/LandingPage'
 import LoginPage from './pages/loginPage'
 
 // Admin pages
@@ -31,9 +32,10 @@ export default function App() {
     <AuthProvider>
       <ErrorBoundary>
         <Routes>
+          <Route path="/" element={<LandingPage />} />
           <Route path="/login" element={<LoginPage />} />
 
-          <Route path="/" element={
+          <Route path="/app" element={
             <ProtectedRoute>
               <Layout />
             </ProtectedRoute>
@@ -62,8 +64,8 @@ export default function App() {
             <Route path="simulator" element={<SimulatorPage />} />
           </Route>
 
-          {/* Catch-all: redirect to login */}
-          <Route path="*" element={<Navigate to="/login" replace />} />
+          {/* Catch-all */}
+          <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </ErrorBoundary>
     </AuthProvider>
