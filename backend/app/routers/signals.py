@@ -4,6 +4,7 @@ Signal card endpoints for the user-facing app.
 from fastapi import APIRouter, HTTPException, Query
 from typing import Optional, List
 from datetime import datetime, timedelta
+from sqlalchemy import or_
 from app.database import SessionLocal, Signal
 
 router = APIRouter(prefix="/signals", tags=["signals"])
@@ -29,10 +30,17 @@ def get_top_signals(
     db = SessionLocal()
     try:
         cutoff = datetime.utcnow() - timedelta(hours=hours)
-        q = db.query(Signal).filter(
-            Signal.generated_at >= cutoff,
-            Signal.confidence >= max(min_confidence, floor),
+        q = db.query(Signal).filter(Signal.generated_at >= cutoff)
+        # SELL signals are intentionally low-confidence (bearish); don't apply
+        # the BUY/HOLD suppress floor to them. Hide uncertain SUPPRESSED rows.
+        q = q.filter(
+            or_(
+                Signal.action == "SELL",
+                Signal.confidence >= max(min_confidence, floor),
+            )
         )
+        if not action:
+            q = q.filter(Signal.action != "SUPPRESSED")
         if market != "all":
             q = q.filter(Signal.market == market)
         if action:
@@ -46,8 +54,11 @@ def get_top_signals(
         for s in rows:
             if s.ticker not in latest_by_ticker:
                 latest_by_ticker[s.ticker] = s
-        signals = sorted(latest_by_ticker.values(),
-                         key=lambda s: s.confidence, reverse=True)[:limit]
+        signals = sorted(
+            latest_by_ticker.values(),
+            key=lambda s: s.confidence if s.action != "SELL" else (1.0 - s.confidence),
+            reverse=True,
+        )[:limit]
         return [_serialize(s) for s in signals]
     finally:
         db.close()
