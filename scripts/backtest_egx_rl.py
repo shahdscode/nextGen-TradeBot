@@ -31,9 +31,10 @@ import pandas as pd
 
 import step4_train_rl as s4   # reuse prepare_env, align_dates, ALGO_CONFIGS
 
-EGX_FEATURES = ROOT / "data" / "oof" / "features_egx.csv"
-OUT_DIR      = ROOT / "data" / "models" / "egx_rl"
-RESULTS      = ROOT / "data" / "results" / "egx_rl_backtest.json"
+MARKET       = os.environ.get("MARKET", "egx").lower()
+EGX_FEATURES = ROOT / "data" / "oof" / ("features_%s.csv" % MARKET)
+OUT_DIR      = ROOT / "data" / "models" / ("%s_rl" % MARKET)
+RESULTS      = ROOT / "data" / "results" / ("%s_rl_backtest.json" % MARKET)
 OUT_DIR.mkdir(parents=True, exist_ok=True)
 
 TRAIN_START = "2019-01-01"

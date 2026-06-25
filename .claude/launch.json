@@ -1,0 +1,18 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tradebot-web",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev", "--", "--host", "--port", "5174"],
+      "port": 5174,
+      "cwd": "frontend"
+    },
+    {
+      "name": "clarityai-dev",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", "-l", "5176", "/Users/shaahdmaansour/Desktop/clarityAI/frontend/dist"],
+      "port": 5176
+    }
+  ]
+}
