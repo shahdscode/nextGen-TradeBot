@@ -49,6 +49,11 @@ class Settings(BaseSettings):
     buy_cost_pct: float = 0.001
     sell_cost_pct: float = 0.001
     slippage_bps: float = 5.0
+    # Deployment / multi-user SaaS
+    environment: str = "development"  # development | production
+    allow_public_register: bool = True
+    cors_origins: str = "http://localhost:5173,http://localhost:80,http://127.0.0.1:5173"
+    seed_admin: bool = False  # set SEED_ADMIN=true to create default admin in production
 
     class Config:
         # Absolute path to the project-root .env so the API/workers/scripts all
@@ -58,8 +63,14 @@ class Settings(BaseSettings):
 
 settings = Settings()
 
+if settings.environment == "production" and settings.jwt_secret_key == _DEFAULT_JWT_SECRET:
+    raise RuntimeError(
+        "Refusing to start in production with the default JWT_SECRET_KEY. "
+        "Set JWT_SECRET_KEY in .env to a strong random value."
+    )
+
 # ── Security check: warn loudly if JWT secret is still the insecure default ──
-if settings.jwt_secret_key == _DEFAULT_JWT_SECRET:
+if settings.jwt_secret_key == _DEFAULT_JWT_SECRET and settings.environment != "production":
     _msg = (
         "\n" + "=" * 70 + "\n"
         "  SECURITY WARNING: JWT_SECRET_KEY is set to the default development\n"

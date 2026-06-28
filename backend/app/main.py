@@ -1,12 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from app.config import settings
 from app.database import create_tables
 from app import finrl_wrapper
 from app.routers import auth, paper_trading, signals, market
 
 # ML/RL routers — only loaded when heavy dependencies are installed
 try:
-    from app.routers import data, training, backtest, ml, research, mobile, fincast
+    from app.routers import data, training, backtest, ml, research, mobile
     _ml_available = True
 except ImportError:
     _ml_available = False
@@ -17,9 +18,10 @@ app = FastAPI(
     version="2.0.0",
 )
 
+_cors = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors if _cors else ["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -29,9 +31,8 @@ app.add_middleware(
 @app.on_event("startup")
 def on_startup():
     create_tables()
-    # Ensure default admin exists for first run
     _seed_default_admin()
-    # Daily auto-rebalance for paper trading (lightweight daemon thread)
+    _backfill_legacy_user_ids()
     try:
         from app.services.scheduler_service import start_scheduler
         start_scheduler()
@@ -40,6 +41,8 @@ def on_startup():
 
 
 def _seed_default_admin():
+    if settings.environment == "production" and not settings.seed_admin:
+        return
     try:
         from app.services.auth_service import create_user, get_user_by_username
         if not get_user_by_username("admin"):
@@ -48,9 +51,31 @@ def _seed_default_admin():
         pass
 
 
+def _backfill_legacy_user_ids():
+    try:
+        from app.database import SessionLocal, User, PaperSession, Backtest, Job
+        db = SessionLocal()
+        try:
+            admin = db.query(User).filter(User.username == "admin").first()
+            if not admin:
+                return
+            uid = admin.id
+            changed = False
+            for model in (PaperSession, Backtest, Job):
+                for row in db.query(model).filter(model.user_id.is_(None)).all():
+                    row.user_id = uid
+                    changed = True
+            if changed:
+                db.commit()
+        finally:
+            db.close()
+    except Exception:
+        pass
+
+
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "environment": settings.environment}
 
 
 @app.get("/")
@@ -74,6 +99,8 @@ def info():
         "indicators": finrl_wrapper.get_indicators(),
         "data_sources": finrl_wrapper.get_data_sources(),
         "finrl_status": finrl_wrapper.get_finrl_status(),
+        "environment": settings.environment,
+        "allow_public_register": settings.allow_public_register,
     }
 
 
@@ -90,4 +117,3 @@ if _ml_available:
     app.include_router(ml.router, prefix="/api")
     app.include_router(research.router, prefix="/api")
     app.include_router(mobile.router, prefix="/api")
-    app.include_router(fincast.router, prefix="/api")

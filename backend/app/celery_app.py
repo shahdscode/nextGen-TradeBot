@@ -11,7 +11,6 @@ celery_app = Celery(
         "app.tasks.backtest_tasks",
         "app.tasks.ml_tasks",
         "app.tasks.meta_tasks",
-        "app.tasks.fincast_tasks",
     ]
 )
 
