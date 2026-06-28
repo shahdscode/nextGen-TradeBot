@@ -12,8 +12,8 @@ import requests
 from fastapi import APIRouter, HTTPException, Depends
 
 from app.config import settings
-from app.database import SessionLocal, PaperSession
-from app.services.auth_service import require_auth
+from app.database import SessionLocal, PaperSession, User
+from app.services.auth_service import require_auth, get_user_id
 
 
 def _apply_user_alpaca(user):
@@ -32,27 +32,26 @@ MT5_CONFIGURED = bool(settings.mt5_gateway_url)
 STOP_LOSS_PCT    = 0.08   # per-position: sell & skip a name down more than this
 MAX_DRAWDOWN_PCT = 0.15   # portfolio kill-switch: liquidate above this drawdown
 
-# In-memory cache — populated from DB on first use.
-_SESSION_CACHE: dict[str, Any] = {}
+MAX_DRAWDOWN_PCT = 0.15   # portfolio kill-switch: liquidate above this drawdown
 
 
 # ── DB helpers ────────────────────────────────────────────────────────────────
 
-def _load_active_session() -> dict[str, Any] | None:
-    """Return the most recent running session from DB, or None."""
+def _load_user_session(user_id: str) -> dict[str, Any] | None:
+    """Return this user's active or most recent session."""
     db = SessionLocal()
     try:
         row = (
             db.query(PaperSession)
-            .filter(PaperSession.running.is_(True))
+            .filter(PaperSession.user_id == user_id, PaperSession.running.is_(True))
             .order_by(PaperSession.started_at.desc())
             .first()
         )
         if row:
             return _row_to_dict(row)
-        # Fall back to most recent stopped session so the UI can still see history
         row = (
             db.query(PaperSession)
+            .filter(PaperSession.user_id == user_id)
             .order_by(PaperSession.created_at.desc())
             .first()
         )
@@ -61,9 +60,27 @@ def _load_active_session() -> dict[str, Any] | None:
         db.close()
 
 
+def _blank_session(user_id: str) -> dict[str, Any]:
+    return {
+        "session_id":   str(uuid.uuid4()),
+        "user_id":      user_id,
+        "running":      False,
+        "run_id":       None,
+        "symbols":      ["AAPL", "MSFT", "JPM"],
+        "timeframe":    "1d",
+        "initial_cash": 100_000.0,
+        "cash":         100_000.0,
+        "positions":    {},
+        "auto_enabled": False,
+        "started_at":   None,
+        "stopped_at":   None,
+    }
+
+
 def _row_to_dict(row: PaperSession) -> dict[str, Any]:
     return {
         "session_id":   row.id,
+        "user_id":      row.user_id,
         "running":      row.running,
         "run_id":       row.run_id,
         "symbols":      row.symbols or [],
@@ -77,7 +94,7 @@ def _row_to_dict(row: PaperSession) -> dict[str, Any]:
     }
 
 
-def _save_session(s: dict[str, Any]) -> PaperSession:
+def _save_session(s: dict[str, Any], user_id: str | None = None) -> PaperSession:
     """Upsert session dict to DB and return the ORM row."""
     db = SessionLocal()
     try:
@@ -85,6 +102,9 @@ def _save_session(s: dict[str, Any]) -> PaperSession:
         if row is None:
             row = PaperSession(id=s["session_id"])
             db.add(row)
+        uid = user_id or s.get("user_id")
+        if uid:
+            row.user_id = uid
         row.run_id       = s.get("run_id")
         row.symbols      = s.get("symbols", [])
         row.timeframe    = s.get("timeframe", "M15")
@@ -110,29 +130,22 @@ def _save_session(s: dict[str, Any]) -> PaperSession:
         db.close()
 
 
-def _get_session() -> dict[str, Any]:
-    """Return the active in-memory session, loading from DB if needed."""
-    global _SESSION_CACHE
-    if not _SESSION_CACHE:
-        loaded = _load_active_session()
-        if loaded:
-            _SESSION_CACHE = loaded
-        else:
-            # Bootstrap a blank session
-            _SESSION_CACHE = {
-                "session_id":   str(uuid.uuid4()),
-                "running":      False,
-                "run_id":       None,
-                "symbols":      ["BTCUSDm", "ETHUSDm", "EURUSD"],
-                "timeframe":    "M15",
-                "initial_cash": 100_000.0,
-                "cash":         100_000.0,
-                "positions":    {},
-                "auto_enabled": False,
-                "started_at":   None,
-                "stopped_at":   None,
-            }
-    return _SESSION_CACHE
+def _get_session(user: User) -> dict[str, Any]:
+    """Return the user's session, bootstrapping a blank one if needed."""
+    uid = get_user_id(user)
+    loaded = _load_user_session(uid)
+    if loaded:
+        return loaded
+    return _blank_session(uid)
+
+
+def _user_session_ids(user: User) -> List[str]:
+    db = SessionLocal()
+    try:
+        rows = db.query(PaperSession.id).filter(PaperSession.user_id == get_user_id(user)).all()
+        return [r[0] for r in rows]
+    finally:
+        db.close()
 
 
 # ── MT5 helpers ───────────────────────────────────────────────────────────────
@@ -244,8 +257,8 @@ def _stopped_out_positions(s: dict[str, Any]) -> dict[str, float]:
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 @router.get("/status")
-def get_status():
-    s = _get_session()
+def get_status(user=Depends(require_auth)):
+    s = _get_session(user)
     return {
         "configured": MT5_CONFIGURED,
         "message":    "MT5 gateway connected" if MT5_CONFIGURED else "Set MT5_GATEWAY_URL to enable paper trading",
@@ -260,54 +273,55 @@ def get_status():
 
 
 @router.post("/start")
-def start_trading(run_id: str, symbols: str = "BTCUSDm,ETHUSDm,EURUSD", timeframe: str = "M15",
-                  initial_cash: float = 100_000.0):
-    _check_mt5()
-
+def start_trading(run_id: str, symbols: str = "AAPL,MSFT,JPM", timeframe: str = "1d",
+                  initial_cash: float = 100_000.0, user=Depends(require_auth)):
     symbol_list = [s.strip() for s in symbols.split(",") if s.strip()]
     if not symbol_list:
         raise HTTPException(status_code=400, detail="At least one symbol is required")
 
-    global _SESSION_CACHE
-    _SESSION_CACHE = {
+    uid = get_user_id(user)
+    existing = _load_user_session(uid)
+    if existing and existing.get("running"):
+        raise HTTPException(status_code=400, detail="Session already running — stop it first")
+
+    s = {
         "session_id":   str(uuid.uuid4()),
+        "user_id":      uid,
         "running":      True,
         "run_id":       run_id,
         "symbols":      symbol_list,
-        "timeframe":    timeframe.upper().strip() or "M15",
+        "timeframe":    timeframe.upper().strip() or "1d",
         "initial_cash": initial_cash,
         "cash":         initial_cash,
         "positions":    {},
+        "auto_enabled": False,
         "started_at":   datetime.utcnow().isoformat(),
         "stopped_at":   None,
     }
-    _save_session(_SESSION_CACHE)
+    _save_session(s, user_id=uid)
 
     return {
-        "message":    "MT5 paper trading started",
+        "message":    "Paper trading session started",
         "run_id":     run_id,
-        "session_id": _SESSION_CACHE["session_id"],
+        "session_id": s["session_id"],
         "symbols":    symbol_list,
-        "timeframe":  _SESSION_CACHE["timeframe"],
+        "timeframe":  s["timeframe"],
     }
 
 
 @router.post("/stop")
-def stop_trading():
-    _check_mt5()
-    global _SESSION_CACHE
-    s = _get_session()
+def stop_trading(user=Depends(require_auth)):
+    s = _get_session(user)
     s["running"]    = False
     s["stopped_at"] = datetime.utcnow().isoformat()
     s["positions"]  = {}
-    _SESSION_CACHE  = s
-    _save_session(s)
-    return {"message": "MT5 paper trading stopped", "session_id": s["session_id"]}
+    _save_session(s, user_id=get_user_id(user))
+    return {"message": "Paper trading stopped", "session_id": s["session_id"]}
 
 
 @router.get("/portfolio")
-def get_portfolio():
-    s = _get_session()
+def get_portfolio(user=Depends(require_auth)):
+    s = _get_session(user)
 
     if not MT5_CONFIGURED:
         return {
@@ -348,8 +362,7 @@ def get_portfolio():
                 pos["qty"] * pos["entry_price"] for pos in s["positions"].values()
             )
             s["cash"] = round(max(0.0, s["initial_cash"] - invested), 2)
-            _SESSION_CACHE.update(s)
-            _save_session(s)
+            _save_session(s, user_id=get_user_id(user))
 
         positions_out    = []
         total_market_val = 0.0
@@ -397,9 +410,146 @@ def get_portfolio():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.get("/analytics")
+def portfolio_analytics(user=Depends(require_auth)):
+    """
+    Portfolio intelligence: sector/symbol allocation, diversification,
+    largest holding, cash %, avg holding period, beta vs SPY (best-effort).
+    """
+    from app.services.portfolio_analytics_service import compute_portfolio_analytics
+    from app.services.trade_log_service import get_trade_log as _get_trades
+    from app.services import alpaca_service
+
+    trades = _get_trades(limit=200, session_ids=_user_session_ids(user))
+
+    sim_snap = get_portfolio(user)
+    sim = compute_portfolio_analytics(sim_snap, trades)
+
+    alpaca = None
+    _apply_user_alpaca(user)
+    if alpaca_service.configured():
+        try:
+            alpaca_snap = alpaca_service.portfolio_snapshot()
+            alpaca = compute_portfolio_analytics(alpaca_snap, trades)
+        except Exception:
+            alpaca = {"has_positions": False, "error": "Could not load Alpaca portfolio"}
+
+    return {"sim": sim, "alpaca": alpaca}
+
+
+@router.get("/command-center")
+def command_center(market: str = "us", user=Depends(require_auth)):
+    """
+    Daily command center — one payload for portfolio health, AI context,
+    performance, opportunities, allocation, trades, alerts, and advisor insight.
+    """
+    from app.routers.signals import get_top_signals
+    from app.services.regime_service import get_regime_info
+    from app.services.fusion_service import meta_learner_status
+    from app.services.portfolio_analytics_service import compute_portfolio_analytics
+    from app.services.portfolio_advisor_service import (
+        ai_confidence_from_signals,
+        build_alerts,
+        generate_advisor_insight,
+        portfolio_health_score,
+    )
+    from app.services.trade_log_service import get_trade_log as _get_trades
+    from app.services import alpaca_service
+
+    db = SessionLocal()
+    try:
+        meta = meta_learner_status(db)
+    finally:
+        db.close()
+
+    regime_info = get_regime_info(market=market)
+    regime = regime_info.get("current_regime", "SIDEWAYS")
+    signals = get_top_signals(market=market, limit=20, action=None, min_confidence=0.0, hours=48)
+    confidence = ai_confidence_from_signals(signals)
+    trades = _get_trades(limit=25, session_ids=_user_session_ids(user))
+
+    sim_snap = get_portfolio(user)
+    sim_an = compute_portfolio_analytics(sim_snap, trades, include_beta=False)
+
+    alpaca_snap = None
+    alpaca_an = None
+    _apply_user_alpaca(user)
+    if alpaca_service.configured():
+        try:
+            alpaca_snap = alpaca_service.portfolio_snapshot()
+            alpaca_an = compute_portfolio_analytics(alpaca_snap, trades, include_beta=False)
+        except Exception:
+            pass
+
+    # Prefer Alpaca when it has real positions; otherwise simulator
+    use_alpaca = bool(alpaca_an and alpaca_an.get("has_positions"))
+    analytics = alpaca_an if use_alpaca else sim_an
+    perf_source = "alpaca" if use_alpaca else "sim"
+
+    if use_alpaca and alpaca_snap:
+        pv = float(alpaca_snap.get("portfolio_value") or 0)
+        dr = float(alpaca_snap.get("daily_return") or 0)
+        performance = {
+            "source": "alpaca",
+            "portfolio_value": pv,
+            "daily_return_pct": round(dr * 100, 2),
+            "daily_pl": round(pv * dr, 2) if pv else 0,
+            "total_return_pct": round((alpaca_snap.get("total_return") or 0) * 100, 2),
+            "drawdown": alpaca_snap.get("drawdown"),
+            "drawdown_breached": bool(alpaca_snap.get("drawdown_breached")),
+        }
+    else:
+        pv = float(sim_snap.get("portfolio_value") or sim_snap.get("initial_cash") or 0)
+        dr = float(sim_snap.get("daily_return") or 0)
+        performance = {
+            "source": "sim",
+            "portfolio_value": pv,
+            "daily_return_pct": round(dr * 100, 2),
+            "daily_pl": round(pv * dr, 2) if pv else 0,
+            "total_return_pct": round(dr * 100, 2),
+            "drawdown": None,
+            "drawdown_breached": False,
+        }
+
+    drawdown = performance.get("drawdown")
+    breached = performance.get("drawdown_breached", False)
+    health = portfolio_health_score(
+        analytics, confidence, regime,
+        drawdown_breached=breached,
+        meta_loaded=bool(meta.get("loaded")),
+    )
+    alerts = build_alerts(trades, analytics, drawdown=drawdown, drawdown_breached=breached)
+    advisor = generate_advisor_insight(
+        analytics, confidence, regime,
+        drawdown=drawdown, drawdown_breached=breached,
+        performance_source=perf_source,
+    )
+
+    opportunities = [s for s in signals if s.get("action") == "BUY"][:6]
+
+    return {
+        "market": market,
+        "as_of": datetime.utcnow().isoformat() + "Z",
+        "portfolio_health": health,
+        "ai_confidence": confidence,
+        "regime": regime_info,
+        "meta_status": meta,
+        "performance": performance,
+        "analytics": analytics,
+        "top_opportunities": opportunities,
+        "recent_trades": trades[:8],
+        "alerts": alerts,
+        "advisor": advisor,
+    }
+
+
 @router.post("/rebalance")
 def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
-              mode: str = "rl", market: str = "us", tickers: str | None = None):
+              mode: str = "rl", market: str = "us", tickers: str | None = None,
+              sizing_method: str = "risk",
+              risk_per_trade_pct: float | None = None,
+              max_position_pct: float | None = None,
+              user=Depends(require_auth)):
     """
     Model-driven trade decision on LIVE data, into the simulated paper account.
 
@@ -415,8 +565,8 @@ def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
     """
     from app.services.live_trading_service import generate_live_allocation, generate_meta_allocation
 
-    global _SESSION_CACHE
-    s = _get_session()
+    s = _get_session(user)
+    uid = get_user_id(user)
     cash = float(s.get("initial_cash") or initial_cash)
     market = (market or "us").lower()
     ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()] if tickers else None
@@ -427,10 +577,9 @@ def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
         drawdown = (cur_val / cash - 1.0) if cash > 0 else 0.0
         if drawdown <= -MAX_DRAWDOWN_PCT:
             s.update({"positions": {}, "cash": cur_val, "running": True,
-                      "initial_cash": cash})
+                      "initial_cash": cash, "user_id": uid})
             s.setdefault("session_id", str(uuid.uuid4()))
-            _SESSION_CACHE = s
-            _save_session(s)
+            _save_session(s, user_id=uid)
             return {
                 "ok": True, "risk_action": "KILL_SWITCH",
                 "drawdown": round(drawdown, 4), "threshold": -MAX_DRAWDOWN_PCT,
@@ -442,10 +591,15 @@ def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
     # ── Risk 2: per-position stop-loss (names down > 8% are sold & skipped) ────
     stopped_out = _stopped_out_positions(s)
 
+    # ── Risk-engine overrides (volatility sizing + portfolio optimization) ────
+    rc = {k: v for k, v in {"risk_per_trade_pct": risk_per_trade_pct,
+                            "max_position_pct": max_position_pct}.items() if v is not None}
+
     # ── Model allocation ──────────────────────────────────────────────────────
     if mode == "meta":
         rid = "meta_learner"
-        alloc = generate_meta_allocation(cash, market=market, tickers=ticker_list)
+        alloc = generate_meta_allocation(cash, market=market, tickers=ticker_list,
+                                         risk_config=rc or None, sizing_method=sizing_method)
     else:
         if market != "us":
             raise HTTPException(status_code=400,
@@ -460,6 +614,7 @@ def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
         raise HTTPException(status_code=400, detail=alloc.get("message", "allocation failed"))
 
     # ── Rebalance to target, excluding stopped-out names this cycle ───────────
+    prev_positions = dict(s.get("positions") or {})
     positions, invested = {}, 0.0
     for tic, qty in alloc["target"].items():
         if tic in stopped_out:
@@ -472,6 +627,7 @@ def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
             invested += qty * px
 
     s.update({
+        "user_id":      uid,
         "run_id":       rid,
         "symbols":      alloc["tickers"],
         "timeframe":    "1d",
@@ -482,8 +638,25 @@ def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
     })
     s.setdefault("session_id", str(uuid.uuid4()))
     s.setdefault("started_at", datetime.utcnow().isoformat())
-    _SESSION_CACHE = s
-    _save_session(s)
+    _save_session(s, user_id=uid)
+
+    # ── Explainable trade logging (#4): record entries + exits with rationale ─
+    if mode == "meta":
+        executed = []
+        for tic, p in positions.items():            # new/updated holdings → BUY
+            if tic not in prev_positions:
+                executed.append({"ticker": tic, "action": "BUY",
+                                 "shares": p["qty"], "price": p["entry_price"]})
+        for tic in prev_positions:                  # dropped holdings → SELL
+            if tic not in positions:
+                executed.append({"ticker": tic, "action": "SELL",
+                                 "shares": prev_positions[tic].get("qty"),
+                                 "price": float(alloc["prices"].get(tic, 0.0))})
+        try:
+            from app.services.trade_log_service import log_trades
+            log_trades(alloc, executed, venue="sim", session_id=s["session_id"])
+        except Exception:
+            pass
 
     return {
         "ok":             True,
@@ -504,20 +677,30 @@ def rebalance(run_id: str | None = None, initial_cash: float = 100_000.0,
 
 
 @router.post("/suggest")
-def suggest(market: str = "us", tickers: str | None = None):
+def suggest(market: str = "us", tickers: str | None = None,
+            sizing_method: str = "risk",
+            risk_per_trade_pct: float | None = None,
+            max_position_pct: float | None = None,
+            user=Depends(require_auth)):
     """
     Advisory ("helping") mode: compute the model's recommended actions WITHOUT
     executing. Returns per-ticker BUY/HOLD/SELL, target weights, regime, and any
     risk flags so the user can review and decide. Nothing is applied to the session.
+
+    sizing_method: "risk" (ATR risk-based) | "risk_parity" | "min_variance" |
+                   "max_sharpe" | "inverse_vol" | "conviction".
     """
     from app.services.live_trading_service import generate_meta_allocation
 
-    s = _get_session()
+    s = _get_session(user)
     cash = float(s.get("initial_cash") or 100_000.0)
     market = (market or "us").lower()
     ticker_list = [t.strip().upper() for t in tickers.split(",") if t.strip()] if tickers else None
+    rc = {k: v for k, v in {"risk_per_trade_pct": risk_per_trade_pct,
+                            "max_position_pct": max_position_pct}.items() if v is not None}
 
-    alloc = generate_meta_allocation(cash, market=market, tickers=ticker_list)
+    alloc = generate_meta_allocation(cash, market=market, tickers=ticker_list,
+                                     risk_config=rc or None, sizing_method=sizing_method)
     if not alloc.get("ok"):
         raise HTTPException(status_code=400, detail=alloc.get("message", "allocation failed"))
 
@@ -528,32 +711,44 @@ def suggest(market: str = "us", tickers: str | None = None):
     prices = alloc.get("prices", {})
     target = alloc.get("target", {})
     total = sum((target.get(t, 0.0) * prices.get(t, 0.0)) for t in alloc["tickers"]) or 1.0
+    stops = alloc.get("stops", {})
     recs = []
     for t in alloc["tickers"]:
         weight = (target.get(t, 0.0) * prices.get(t, 0.0)) / total
-        recs.append({"ticker": t, "action": alloc["signals"].get(t, "HOLD"),
-                     "target_weight": round(weight, 4),
-                     "stop_loss": t in stopped_out})
+        rec = {"ticker": t, "action": alloc["signals"].get(t, "HOLD"),
+               "target_weight": round(weight, 4),
+               "stop_loss": t in stopped_out}
+        if t in stops:                       # entry/stop/target from the risk engine
+            rec["entry"] = prices.get(t)
+            rec["stop_price"] = stops[t]["stop_price"]
+            rec["take_profit"] = stops[t]["take_profit"]
+        recs.append(rec)
     recs.sort(key=lambda r: (r["action"] != "BUY", -r["target_weight"]))
 
+    sizing = alloc.get("sizing") or {}
+    portfolio = alloc.get("portfolio") or {}
     return {
         "ok": True, "mode": "advisory", "as_of": alloc["as_of"], "market": market,
         "regime": alloc.get("regime"), "defensive": alloc.get("defensive", False),
+        "vol_regime": alloc.get("vol_regime"),
         "message": alloc["message"], "stopped_out": stopped_out,
         "recommendations": recs,
+        "sizing_method": alloc.get("sizing_method"),
+        "gross_exposure": sizing.get("gross_exposure"),
+        "cash_weight": sizing.get("cash_weight"),
+        "risk_config": sizing.get("config"),
+        "avg_correlation": portfolio.get("avg_correlation"),
         "note": "Advisory only — nothing was executed. Use Rebalance to apply.",
     }
 
 
 @router.post("/auto")
-def set_auto(enabled: bool):
+def set_auto(enabled: bool, user=Depends(require_auth)):
     """Enable/disable automated scheduler rebalancing for the active session."""
-    global _SESSION_CACHE
-    s = _get_session()
+    s = _get_session(user)
     s["auto_enabled"] = bool(enabled)
     s.setdefault("session_id", str(uuid.uuid4()))
-    _SESSION_CACHE = s
-    _save_session(s)
+    _save_session(s, user_id=get_user_id(user))
     return {"ok": True, "auto_enabled": s["auto_enabled"], "session_id": s["session_id"]}
 
 
@@ -601,7 +796,9 @@ def alpaca_risk_check(max_drawdown_pct: float = 0.15, user=Depends(require_auth)
 
 
 @router.post("/alpaca/rebalance")
-def alpaca_rebalance(run_id: str | None = None, mode: str = "rl", user=Depends(require_auth)):
+def alpaca_rebalance(run_id: str | None = None, mode: str = "rl",
+                     sizing_method: str = "risk", use_brackets: bool = False,
+                     user=Depends(require_auth)):
     """
     Run the model on live DOW30 data and rebalance the ALPACA paper account to
     the model's target weights (real broker orders). mode='rl' (single model,
@@ -626,7 +823,7 @@ def alpaca_rebalance(run_id: str | None = None, mode: str = "rl", user=Depends(r
     except Exception:
         pass
 
-    s = _get_session()
+    s = _get_session(user)
     equity = None
     try:
         equity = alpaca_service.get_account()["equity"]
@@ -635,7 +832,7 @@ def alpaca_rebalance(run_id: str | None = None, mode: str = "rl", user=Depends(r
     budget = equity or float(s.get("initial_cash") or 100_000.0)
 
     if mode == "meta":
-        alloc = generate_meta_allocation(budget, market="us")
+        alloc = generate_meta_allocation(budget, market="us", sizing_method=sizing_method)
         rid = "meta_learner"
     else:
         rid = run_id or s.get("run_id")
@@ -656,21 +853,47 @@ def alpaca_rebalance(run_id: str | None = None, mode: str = "rl", user=Depends(r
     except Exception:
         pass
 
-    # Convert model target (shares × price) → portfolio weights
-    target_val = {t: alloc["target"].get(t, 0.0) * alloc["prices"].get(t, 0.0)
-                  for t in alloc["tickers"] if t not in stopped_out}
-    total = sum(v for v in target_val.values() if v > 0)
-    weights = {t: (v / total) for t, v in target_val.items() if v > 0} if total > 0 else {}
-
-    result = alpaca_service.rebalance_to_weights(weights)
+    # ── Execution: bracket orders (entry+stop+target) or plain weight rebalance ─
+    if use_brackets and mode == "meta":
+        # Build bracket targets from the risk engine's sized positions + stops.
+        sized_positions = (alloc.get("sizing") or {}).get("positions", {})
+        stops = alloc.get("stops", {})
+        bracket_targets = {
+            t: {"dollars": p["dollars"], "price": alloc["prices"].get(t, p.get("entry", 0.0)),
+                "stop_price": stops.get(t, {}).get("stop_price"),
+                "take_profit": stops.get(t, {}).get("take_profit")}
+            for t, p in sized_positions.items() if t not in stopped_out
+        }
+        result = alpaca_service.rebalance_with_brackets(bracket_targets)
+        weights = {t: round(p["weight"], 4) for t, p in sized_positions.items()
+                   if t not in stopped_out}
+    else:
+        # Convert model target (shares × price) → portfolio weights
+        target_val = {t: alloc["target"].get(t, 0.0) * alloc["prices"].get(t, 0.0)
+                      for t in alloc["tickers"] if t not in stopped_out}
+        total = sum(v for v in target_val.values() if v > 0)
+        weights = {t: (v / total) for t, v in target_val.items() if v > 0} if total > 0 else {}
+        result = alpaca_service.rebalance_to_weights(weights)
 
     # Persist session intent
-    global _SESSION_CACHE
-    s.update({"run_id": rid, "symbols": alloc["tickers"], "timeframe": "1d",
+    uid = get_user_id(user)
+    s.update({"user_id": uid, "run_id": rid, "symbols": alloc["tickers"], "timeframe": "1d",
               "running": True, "initial_cash": float(s.get("initial_cash") or 100_000.0)})
     s.setdefault("session_id", str(uuid.uuid4()))
-    _SESSION_CACHE = s
-    _save_session(s)
+    _save_session(s, user_id=uid)
+
+    # ── Explainable trade logging (#4): record the broker orders submitted ────
+    if mode == "meta":
+        executed = [{"ticker": o.get("symbol"),
+                     "action": (o.get("side") or "").upper(),
+                     "shares": None,
+                     "price": float(alloc["prices"].get(o.get("symbol"), 0.0))}
+                    for o in result.get("orders", []) if o.get("symbol")]
+        try:
+            from app.services.trade_log_service import log_trades
+            log_trades(alloc, executed, venue="alpaca", session_id=s["session_id"])
+        except Exception:
+            pass
 
     return {
         "ok": True, "broker": "alpaca_paper", "mode": mode, "run_id": rid,
@@ -682,13 +905,46 @@ def alpaca_rebalance(run_id: str | None = None, mode: str = "rl", user=Depends(r
     }
 
 
+@router.get("/trade-log")
+def get_trade_log(limit: int = 50, session_id: str | None = None, ticker: str | None = None,
+                  user=Depends(require_auth)):
+    """
+    Explainable trade journal scoped to this user's paper sessions.
+    """
+    from app.services.trade_log_service import get_trade_log as _get
+    allowed = _user_session_ids(user)
+    if session_id and session_id not in allowed:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return _get(limit=limit, session_id=session_id, ticker=ticker, session_ids=allowed if not session_id else None)
+
+
+@router.get("/trade-log/{trade_id}")
+def get_trade_decision(trade_id: str, user=Depends(require_auth)):
+    """Full decision trace for one trade (Decision Explorer)."""
+    from app.database import TradeLog
+    from app.services.decision_explorer_service import build_decision_trace
+
+    allowed = _user_session_ids(user)
+    db = SessionLocal()
+    try:
+        row = db.query(TradeLog).filter(TradeLog.id == trade_id).first()
+        if not row:
+            raise HTTPException(status_code=404, detail="Trade not found")
+        if allowed is not None and row.session_id not in allowed:
+            raise HTTPException(status_code=404, detail="Trade not found")
+        return build_decision_trace(row)
+    finally:
+        db.close()
+
+
 @router.get("/history")
-def get_session_history(limit: int = 20):
-    """Return past paper trading sessions (most recent first)."""
+def get_session_history(limit: int = 20, user=Depends(require_auth)):
+    """Return this user's past paper trading sessions."""
     db = SessionLocal()
     try:
         rows = (
             db.query(PaperSession)
+            .filter(PaperSession.user_id == get_user_id(user))
             .order_by(PaperSession.created_at.desc())
             .limit(limit)
             .all()

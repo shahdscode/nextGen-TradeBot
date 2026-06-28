@@ -293,3 +293,14 @@ def get_performance_scores():
         return {"current_weights": weights, "recent_scores": scores}
     finally:
         db.close()
+
+
+@router.get("/meta/status")
+def meta_status():
+    """Whether the production meta-learner and EWMA tracker are active."""
+    from app.services.fusion_service import meta_learner_status
+    db = SessionLocal()
+    try:
+        return meta_learner_status(db)
+    finally:
+        db.close()
