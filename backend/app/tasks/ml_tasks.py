@@ -76,7 +76,7 @@ def generate_signals_task(self, job_id: str, tickers: list, market: str = "us",
     import pandas as pd
     from pathlib import Path
     from app.config import settings
-    from app.services.fusion_service import generate_full_signal
+    from app.services.fusion_service import generate_full_signal, production_fusion_flags
 
     db = SessionLocal()
     try:
@@ -85,6 +85,7 @@ def generate_signals_task(self, job_id: str, tickers: list, market: str = "us",
         job.updated_at = datetime.utcnow()
         db.commit()
 
+        fusion = production_fusion_flags(db)
         xgb_model_path  = _get_model_path(db, xgb_run_id)
         lstm_model_path = _get_model_path(db, lstm_run_id)
 
@@ -94,12 +95,6 @@ def generate_signals_task(self, job_id: str, tickers: list, market: str = "us",
             if data_path.exists():
                 df = pd.read_csv(data_path)
 
-        # When no per-run model paths are supplied, fall back to the POOLED
-        # DEPLOYABLE models (the same ones live Alpaca trading uses). The OOF
-        # training steps never save per-ticker models, so without this every
-        # prediction defaults to neutral 0.5 and gets suppressed.
-        # Works for both markets: the pooled deployable models were trained on
-        # US + EGX rows (50 tickers), and build_features zeroes VIX for .CA names.
         deploy_sigs = {}
         if not xgb_model_path and not lstm_model_path:
             try:
@@ -122,13 +117,23 @@ def generate_signals_task(self, job_id: str, tickers: list, market: str = "us",
                     xgb_prob_override=(ds["xgb"] if ds else None),
                     lstm_prob_override=(ds["lstm"] if ds else None),
                     shap_features_override=(ds["shap"] if ds else None),
+                    use_meta_learner=fusion["use_meta_learner"],
+                    meta_learner_path=fusion["meta_learner_path"],
+                    use_adaptive_weights=fusion["use_adaptive_weights"],
+                    calibrator_path=fusion["calibrator_path"],
+                    db_session=db,
                 )
                 cards.append(card)
             except Exception as e:
                 cards.append({"ticker": ticker, "error": str(e)})
 
         job.status = "done"
-        job.meta = {"signals_generated": len(cards), "tickers": tickers}
+        job.meta = {
+            "signals_generated": len(cards),
+            "tickers": tickers,
+            "fusion_method": fusion.get("use_meta_learner") and "meta_learner"
+                             or (fusion.get("use_adaptive_weights") and "ewma" or "fixed"),
+        }
         job.updated_at = datetime.utcnow()
         db.commit()
         return {"status": "done", "count": len(cards)}

@@ -1,7 +1,7 @@
 import logging
 import threading
 import uuid
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Depends
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,7 @@ from app.ticker_catalog import validate_tickers_for_source
 from app.tasks.data_tasks import download_task
 from app.services.data_service import get_preview
 from app import finrl_wrapper
+from app.services.auth_service import require_admin, get_user_id
 from datetime import datetime
 
 router = APIRouter(prefix="/data", tags=["data"])
@@ -49,7 +50,7 @@ def validate_tickers(req: TickerValidateRequest):
 
 
 @router.post("/download", response_model=JobStatusResponse)
-def download(req: DataDownloadRequest):
+def download(req: DataDownloadRequest, user=Depends(require_admin)):
     check = validate_tickers_for_source(req.source, req.tickers)
     if not check["valid"]:
         raise HTTPException(status_code=400, detail=check["message"])
@@ -58,6 +59,7 @@ def download(req: DataDownloadRequest):
     db = SessionLocal()
     job = Job(
         id=job_id,
+        user_id=get_user_id(user),
         type="data",
         status="pending",
         created_at=datetime.utcnow(),
@@ -118,7 +120,7 @@ def preview(job_id: str, n: int = 20):
 
 
 @router.get("/jobs")
-def list_jobs():
+def list_jobs(user=Depends(require_admin)):
     """List all data download jobs."""
     db = SessionLocal()
     jobs = db.query(Job).filter(Job.type == "data").order_by(Job.created_at.desc()).all()

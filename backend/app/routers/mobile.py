@@ -5,10 +5,11 @@ from __future__ import annotations
 
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Depends
 
 from app.database import SessionLocal, Backtest, Run
 from app.services.pipeline_service import pipeline_status as get_pipeline_status
+from app.services.auth_service import get_current_user, get_user_id
 
 router = APIRouter(prefix="/mobile", tags=["mobile"])
 
@@ -27,7 +28,7 @@ def mobile_health():
 
 
 @router.get("/dashboard")
-def mobile_dashboard(market: str = Query("us")):
+def mobile_dashboard(market: str = Query("us"), user=Depends(get_current_user)):
     """Home tab: regime, movers, top signals, recent backtests in one call."""
     import logging
     from fastapi import HTTPException
@@ -66,13 +67,10 @@ def mobile_dashboard(market: str = Query("us")):
 
     db = SessionLocal()
     try:
-        recent_bt = (
-            db.query(Backtest)
-            .filter(Backtest.status == "done")
-            .order_by(Backtest.created_at.desc())
-            .limit(5)
-            .all()
-        )
+        bt_q = db.query(Backtest).filter(Backtest.status == "done")
+        if user and user.role != "admin":
+            bt_q = bt_q.filter(Backtest.user_id == get_user_id(user))
+        recent_bt = bt_q.order_by(Backtest.created_at.desc()).limit(5).all()
         done_runs = (
             db.query(Run)
             .filter(Run.status == "done")

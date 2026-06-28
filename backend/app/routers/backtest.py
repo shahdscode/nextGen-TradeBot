@@ -2,22 +2,34 @@ import json
 import uuid
 from pathlib import Path
 from typing import Optional
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Depends
 from app.config import settings
 from app.database import SessionLocal, Backtest
 from app.models.schemas import BacktestRequest, BacktestResponse
 from app.tasks.backtest_tasks import backtest_task
+from app.services.backtest_service import enrich_backtest_result
+from app.services.auth_service import require_auth, get_user_id
 from datetime import datetime
 
 router = APIRouter(prefix="/backtest", tags=["backtest"])
 
 
+def _can_access_backtest(bt: Backtest, user) -> bool:
+    if user.role == "admin":
+        return True
+    uid = get_user_id(user)
+    if bt.user_id is None:
+        return False
+    return bt.user_id == uid
+
+
 @router.post("", response_model=BacktestResponse)
-def create_backtest(req: BacktestRequest):
+def create_backtest(req: BacktestRequest, user=Depends(require_auth)):
     backtest_id = str(uuid.uuid4())
     db = SessionLocal()
     bt = Backtest(
         id=backtest_id,
+        user_id=get_user_id(user),
         run_id=req.run_id,
         status="pending",
         created_at=datetime.utcnow(),
@@ -38,14 +50,14 @@ def create_backtest(req: BacktestRequest):
 
 
 @router.get("/{backtest_id}", response_model=BacktestResponse)
-def get_backtest(backtest_id: str):
+def get_backtest(backtest_id: str, user=Depends(require_auth)):
     db = SessionLocal()
     bt = db.query(Backtest).filter(Backtest.id == backtest_id).first()
     db.close()
-    if not bt:
+    if not bt or not _can_access_backtest(bt, user):
         raise HTTPException(status_code=404, detail="Backtest not found")
 
-    result = bt.result_json or {}
+    result = enrich_backtest_result(bt.result_json or {})
     return BacktestResponse(
         backtest_id=bt.id,
         run_id=bt.run_id,
@@ -64,6 +76,7 @@ def get_backtest(backtest_id: str):
         rl_sanity=result.get("rl_sanity"),
         overfitting_report=result.get("overfitting_report"),
         regime_analysis=result.get("regime_analysis"),
+        fundamental_attribution=result.get("fundamental_attribution"),
         significance_tests=result.get("significance_tests"),
         methodology_notes=result.get("methodology_notes"),
         data_source=result.get("data_source"),
@@ -80,7 +93,13 @@ def get_step_log(
     backtest_id: str,
     page: int = Query(0, ge=0, description="Page number (0-indexed)"),
     size: int = Query(100, ge=1, le=1000, description="Rows per page"),
+    user=Depends(require_auth),
 ):
+    db = SessionLocal()
+    bt = db.query(Backtest).filter(Backtest.id == backtest_id).first()
+    db.close()
+    if not bt or not _can_access_backtest(bt, user):
+        raise HTTPException(status_code=404, detail="Backtest not found")
     """
     Return a paginated view of the per-step debug log.
     Each row contains: step, date, portfolio_value, cash, positions,
@@ -114,9 +133,11 @@ def get_step_log(
 
 
 @router.get("")
-def list_backtests(run_id: Optional[str] = Query(None)):
+def list_backtests(run_id: Optional[str] = Query(None), user=Depends(require_auth)):
     db = SessionLocal()
     q = db.query(Backtest).order_by(Backtest.created_at.desc())
+    if user.role != "admin":
+        q = q.filter(Backtest.user_id == get_user_id(user))
     if run_id:
         q = q.filter(Backtest.run_id == run_id)
     bts = q.all()
@@ -129,7 +150,7 @@ def list_backtests(run_id: Optional[str] = Query(None)):
             "test_start": bt.test_start,
             "test_end": bt.test_end,
             "created_at": str(bt.created_at),
-            "metrics": (bt.result_json or {}).get("metrics"),
+            "metrics": enrich_backtest_result(bt.result_json or {}).get("metrics"),
         }
         for bt in bts
     ]

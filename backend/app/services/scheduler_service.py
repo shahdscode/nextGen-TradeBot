@@ -2,36 +2,32 @@
 Lightweight daily auto-rebalance scheduler for paper trading.
 
 A daemon thread wakes periodically and, once per day after the US market close,
-re-runs the active paper session's model on live DOW30 data and rebalances the
-paper portfolio. No external scheduler dependency (no APScheduler/cron).
+re-runs each user's auto-enabled paper session on live DOW30 data.
 
-The session's run_id selects the mode:
-  run_id == "meta_learner"  → full 7-model meta-learner ensemble
-  otherwise                 → that single RL model
+Per-user: each PaperSession with auto_enabled=True is rebalanced independently,
+using that user's Alpaca paper keys when configured.
 """
 from __future__ import annotations
 
 import logging
 import threading
 import time
-import uuid
 from datetime import datetime, timezone
 
 logger = logging.getLogger(__name__)
 
-REBALANCE_HOUR_UTC = 21      # ~after US close (16:00–17:00 ET)
-SIGNALS_HOUR_UTC   = 21      # regenerate the signal feed daily after close
-CHECK_INTERVAL_SEC = 1800    # check every 30 min
-REBALANCE_WEEKDAY  = 0       # Monday — rebalance once per week (daily-trained
-                             # models + weekly cadence avoids friction churn)
+REBALANCE_HOUR_UTC = 21
+SIGNALS_HOUR_UTC   = 21
+CHECK_INTERVAL_SEC = 1800
+REBALANCE_WEEKDAY  = 0
 _last_run_week: str | None = None
 _last_signal_day: str | None = None
+_last_ewma_day: str | None = None
 _started = False
 
 
 def _run_daily_signals():
-    """Regenerate the user-facing signal feed for US + EGX once per day, so the
-    48h /signals/top window never goes empty without a manual admin run."""
+    """Regenerate the shared signal feed for US + EGX once per day."""
     import uuid
     from app.database import SessionLocal, Job
     from app.tasks.ml_tasks import generate_signals_task
@@ -51,15 +47,63 @@ def _run_daily_signals():
         logger.info("Daily signal generation queued: %s (%d tickers)", market, len(tickers))
 
 
-def _apply(alloc: dict, cash: float, db, PaperSession):
-    """Update the active PaperSession positions to the model's target allocation."""
-    from sqlalchemy import desc
-    row = (db.query(PaperSession)
-           .filter(PaperSession.running == True)  # noqa: E712
-           .order_by(desc(PaperSession.created_at)).first())
-    if not row:
-        return False
+def _run_ewma_update():
+    """Best-effort EWMA score update after market close (uses prior-day signals)."""
+    import numpy as np
+    from datetime import timedelta
+    from app.database import SessionLocal, Signal
+    from app.services.ewma_tracker_service import initialize_tracker, update_scores_for_date
 
+    db = SessionLocal()
+    try:
+        initialize_tracker(db)
+        yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
+        recent = (
+            db.query(Signal)
+            .filter(Signal.market == "us")
+            .order_by(Signal.generated_at.desc())
+            .limit(500)
+            .all()
+        )
+        rows = [r for r in recent if r.generated_at and r.generated_at.strftime("%Y-%m-%d") == yesterday]
+        if not rows:
+            logger.info("EWMA update: no US signals for %s — skipping", yesterday)
+            return
+        preds = {
+            "xgboost": float(np.mean([r.xgb_prob or 0.5 for r in rows])),
+            "lstm": float(np.mean([r.lstm_prob or 0.5 for r in rows])),
+            "ppo": float(np.mean([r.ppo_signal or 0.5 for r in rows])),
+            "a2c": float(np.mean([r.ppo_signal or 0.5 for r in rows])),
+            "ddpg": float(np.mean([r.ppo_signal or 0.5 for r in rows])),
+            "td3": float(np.mean([r.ppo_signal or 0.5 for r in rows])),
+            "sac": float(np.mean([r.ppo_signal or 0.5 for r in rows])),
+        }
+        try:
+            import yfinance as yf
+            tickers = list({r.ticker for r in rows if r.ticker})[:10]
+            if tickers:
+                hist = yf.download(tickers, period="5d", progress=False, auto_adjust=True)
+                rets = {}
+                if hist is not None and not hist.empty:
+                    close = hist["Close"] if "Close" in hist.columns else hist
+                    for t in tickers:
+                        try:
+                            s = close[t] if hasattr(close, "columns") else close
+                            if len(s) >= 2:
+                                rets[t] = float(s.iloc[-1] / s.iloc[-2] - 1)
+                        except Exception:
+                            pass
+                if rets:
+                    update_scores_for_date(yesterday, preds, rets, db)
+                    logger.info("EWMA scores updated for %s (%d tickers)", yesterday, len(rets))
+        except Exception as exc:
+            logger.warning("EWMA update skipped: %s", exc)
+    finally:
+        db.close()
+
+
+def _apply_sim_session(row, alloc: dict, cash: float, db) -> bool:
+    """Update one user's simulated PaperSession positions."""
     positions, invested = {}, 0.0
     for tic, qty in alloc["target"].items():
         if qty and qty > 0:
@@ -72,73 +116,77 @@ def _apply(alloc: dict, cash: float, db, PaperSession):
     row.symbols = alloc["tickers"]
     row.updated_at = datetime.utcnow()
     db.commit()
-    logger.info("Daily rebalance applied: %s (%d positions, $%.0f invested)",
-                alloc.get("message", ""), len(positions), invested)
+    logger.info("Daily sim rebalance user=%s session=%s (%d positions)",
+                row.user_id, row.id, len(positions))
     return True
 
 
-def _run_weekly_rebalance():
-    """
-    Weekly hands-off rebalance of the active paper session's model.
-
-    Routing:
-      - If Alpaca is configured → submit real orders to the Alpaca paper account
-        (model weights, with cash buffer).
-      - Else → update the internal Yahoo-simulated session positions.
-    Model: session.run_id == 'meta_learner' → ensemble, else single RL model.
-    """
-    from app.database import SessionLocal, PaperSession
+def _rebalance_one_session(row, db) -> None:
+    """Rebalance a single auto-enabled paper session (sim or Alpaca)."""
+    from app.database import User
     from app.services.live_trading_service import (
         generate_live_allocation, generate_meta_allocation,
     )
     from app.services import alpaca_service
+
+    user = db.query(User).filter(User.id == row.user_id).first() if row.user_id else None
+    if user:
+        alpaca_service.use_credentials(user.alpaca_api_key, user.alpaca_api_secret)
+
+    cash = float(row.initial_cash or 100_000.0)
+    run_id = row.run_id or ""
+    if alpaca_service.configured():
+        try:
+            cash = alpaca_service.get_account()["equity"]
+        except Exception:
+            pass
+
+    if run_id == "meta_learner":
+        alloc = generate_meta_allocation(cash)
+    elif run_id:
+        alloc = generate_live_allocation(run_id, cash)
+    else:
+        logger.info("Weekly rebalance: session %s has no run_id — skipping", row.id)
+        return
+    if not alloc.get("ok"):
+        logger.warning("Weekly rebalance failed session=%s: %s", row.id, alloc.get("message"))
+        return
+
+    if alpaca_service.configured():
+        risk = alpaca_service.enforce_risk()
+        if risk.get("breached"):
+            logger.warning("Weekly rebalance halted session=%s: %s", row.id, risk.get("action"))
+            return
+        tv = {t: alloc["target"].get(t, 0.0) * alloc["prices"].get(t, 0.0)
+              for t in alloc["tickers"]}
+        tot = sum(v for v in tv.values() if v > 0)
+        weights = {t: v / tot for t, v in tv.items() if v > 0} if tot > 0 else {}
+        res = alpaca_service.rebalance_to_weights(weights)
+        logger.info("Weekly Alpaca rebalance user=%s: %d orders",
+                    row.user_id, res.get("n_orders", 0))
+    else:
+        _apply_sim_session(row, alloc, cash, db)
+
+
+def _run_weekly_rebalance():
+    """Rebalance every auto-enabled running session (per-user)."""
+    from app.database import SessionLocal, PaperSession
+
     db = SessionLocal()
     try:
-        from sqlalchemy import desc
-        row = (db.query(PaperSession)
-               .filter(PaperSession.running == True)  # noqa: E712
-               .order_by(desc(PaperSession.created_at)).first())
-        if not row:
-            logger.info("Weekly rebalance: no active paper session — skipping")
+        rows = (
+            db.query(PaperSession)
+            .filter(PaperSession.running.is_(True), PaperSession.auto_enabled.is_(True))
+            .all()
+        )
+        if not rows:
+            logger.info("Weekly rebalance: no auto-enabled sessions — skipping")
             return
-        if not getattr(row, "auto_enabled", False):
-            logger.info("Weekly rebalance: session auto-trade disabled — skipping")
-            return
-        cash = float(row.initial_cash or 100_000.0)
-        run_id = row.run_id or ""
-        # Use Alpaca equity as the budget when available
-        if alpaca_service.configured():
+        for row in rows:
             try:
-                cash = alpaca_service.get_account()["equity"]
+                _rebalance_one_session(row, db)
             except Exception:
-                pass
-        if run_id == "meta_learner":
-            alloc = generate_meta_allocation(cash)
-        elif run_id:
-            alloc = generate_live_allocation(run_id, cash)
-        else:
-            logger.info("Weekly rebalance: session has no run_id — skipping")
-            return
-        if not alloc.get("ok"):
-            logger.warning("Weekly rebalance allocation failed: %s", alloc.get("message"))
-            return
-
-        if alpaca_service.configured():
-            # Risk kill-switch FIRST: if drawdown breached, liquidate & skip buy
-            risk = alpaca_service.enforce_risk()
-            if risk.get("breached"):
-                logger.warning("Weekly rebalance halted by risk overlay: %s", risk.get("action"))
-                return
-            # Model target (shares×price) → portfolio weights → Alpaca orders
-            tv = {t: alloc["target"].get(t, 0.0) * alloc["prices"].get(t, 0.0)
-                  for t in alloc["tickers"]}
-            tot = sum(v for v in tv.values() if v > 0)
-            weights = {t: v / tot for t, v in tv.items() if v > 0} if tot > 0 else {}
-            res = alpaca_service.rebalance_to_weights(weights)
-            logger.info("Weekly Alpaca rebalance: %s — %d orders (%s)",
-                        alloc.get("message", ""), res.get("n_orders", 0), res.get("note", ""))
-        else:
-            _apply(alloc, cash, db, PaperSession)
+                logger.exception("Weekly rebalance failed for session %s", row.id)
     except Exception:
         logger.exception("Weekly rebalance crashed")
     finally:
@@ -146,18 +194,19 @@ def _run_weekly_rebalance():
 
 
 def _loop():
-    global _last_run_week, _last_signal_day
+    global _last_run_week, _last_signal_day, _last_ewma_day
     while True:
         try:
             now = datetime.now(timezone.utc)
             iso_week = f"{now.isocalendar().year}-W{now.isocalendar().week}"
             iso_day = now.strftime("%Y-%m-%d")
-            # Daily: regenerate the signal feed after close
             if now.hour >= SIGNALS_HOUR_UTC and _last_signal_day != iso_day:
                 logger.info("Triggering daily signal generation (%s)", iso_day)
                 _run_daily_signals()
                 _last_signal_day = iso_day
-            # Weekly: rebalance the active paper session on REBALANCE_WEEKDAY after close
+            if now.hour >= SIGNALS_HOUR_UTC and _last_ewma_day != iso_day:
+                _run_ewma_update()
+                _last_ewma_day = iso_day
             if (now.weekday() == REBALANCE_WEEKDAY
                     and now.hour >= REBALANCE_HOUR_UTC
                     and _last_run_week != iso_week):
@@ -170,22 +219,19 @@ def _loop():
 
 
 def trigger_rebalance_now():
-    """Manual one-off trigger (used by an API endpoint / testing)."""
     _run_weekly_rebalance()
 
 
 def trigger_daily_signals_now():
-    """Manual one-off trigger for the daily signal-feed regeneration."""
     _run_daily_signals()
 
 
 def start_scheduler():
-    """Start the weekly rebalance daemon thread (idempotent)."""
     global _started
     if _started:
         return
     _started = True
     t = threading.Thread(target=_loop, name="paper-rebalance-scheduler", daemon=True)
     t.start()
-    logger.info("Paper-trading weekly rebalance scheduler started "
-                "(weekday=%d, UTC hour=%d, Alpaca-aware)", REBALANCE_WEEKDAY, REBALANCE_HOUR_UTC)
+    logger.info("Paper-trading scheduler started (weekday=%d, UTC hour=%d)",
+                REBALANCE_WEEKDAY, REBALANCE_HOUR_UTC)
