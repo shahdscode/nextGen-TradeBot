@@ -1,8 +1,12 @@
 import { useState, useEffect } from 'react'
+import { Link } from 'react-router-dom'
 import { LineChart, Line, ResponsiveContainer, YAxis, Tooltip } from 'recharts'
 import client from '../api/client'
 import { CardSkeleton } from '../components/Skeleton'
 import { CHART_TOOLTIP_STYLE } from '../chartTheme'
+import { InsightsDashboard, RichTradeJournal } from '../components/paperTradingInsights'
+import PortfolioIntelligence from '../components/PortfolioIntelligence'
+import { computeAIConfidence } from '../utils/signalVotes'
 
 export default function PaperTradingPage() {
   const [loading, setLoading] = useState(true)
@@ -13,7 +17,7 @@ export default function PaperTradingPage() {
   // ── Alpaca paper broker ──────────────────────────────────────────────────
   const [alpaca, setAlpaca] = useState(null)
   const [alpacaPf, setAlpacaPf] = useState(null)
-  const [alpacaMode, setAlpacaMode] = useState('rl')
+  const [alpacaMode, setAlpacaMode] = useState('meta')
   const [alpacaResult, setAlpacaResult] = useState(null)
 
   // ── Simulated session (US + EGX, with market/ticker picker) ───────────────
@@ -24,15 +28,61 @@ export default function PaperTradingPage() {
   const [suggestions, setSuggestions] = useState(null)   // advisory mode
   const [autoEnabled, setAutoEnabled] = useState(false)  // automated mode
 
+  // ── Risk & portfolio controls (#1–#3) ─────────────────────────────────────
+  const [sizingMethod, setSizingMethod] = useState('risk')
+  const [riskPerTrade, setRiskPerTrade] = useState('1')   // % of equity per trade
+  const [maxPosition, setMaxPosition] = useState('20')    // % of equity per name
+  const [useBrackets, setUseBrackets] = useState(false)   // Alpaca bracket orders
+  const [tradeLog, setTradeLog] = useState([])
+  const [alpacaConfigured, setAlpacaConfigured] = useState(true)
+  const [signals, setSignals] = useState([])
+  const [regime, setRegime] = useState(null)
+  const [metaStatus, setMetaStatus] = useState(null)
+  const [weights, setWeights] = useState(null)
+  const [insightMarket, setInsightMarket] = useState('us')
+  const [portfolioAnalytics, setPortfolioAnalytics] = useState(null)
+  const [portfolioSource, setPortfolioSource] = useState('sim')
+
+  const aiConfidence = computeAIConfidence(signals)
+
+  const loadPortfolioAnalytics = () =>
+    client.get('/api/paper-trading/analytics')
+      .then(r => setPortfolioAnalytics(r.data))
+      .catch(() => setPortfolioAnalytics(null))
+
+  const loadInsights = (market = insightMarket) => Promise.all([
+    client.get('/api/signals/top', { params: { market, limit: 30 } })
+      .then(r => setSignals(r.data || [])).catch(() => setSignals([])),
+    client.get('/api/market/regime', { params: { market } })
+      .then(r => setRegime(r.data)).catch(() => {}),
+    client.get('/api/ml/meta/status')
+      .then(r => setMetaStatus(r.data)).catch(() => {}),
+    client.get('/api/ml/weights/current')
+      .then(r => setWeights(r.data)).catch(() => {}),
+  ])
+
+  const riskParams = () => {
+    const p = { sizing_method: sizingMethod }
+    if (riskPerTrade) p.risk_per_trade_pct = Number(riskPerTrade) / 100
+    if (maxPosition) p.max_position_pct = Number(maxPosition) / 100
+    return p
+  }
+
+  const loadTradeLog = () =>
+    client.get('/api/paper-trading/trade-log', { params: { limit: 25 } })
+      .then(r => setTradeLog(r.data || [])).catch(() => {})
+
   const refreshSim = () => Promise.all([
     client.get('/api/paper-trading/portfolio').then(r => setSimPf(r.data)).catch(() => {}),
     client.get('/api/paper-trading/status').then(r => setAutoEnabled(!!r.data.auto_enabled)).catch(() => {}),
+    loadTradeLog(),
+    loadPortfolioAnalytics(),
   ])
 
   const handleSuggest = async () => {
     setBusy(true); setSuggestions(null)
     try {
-      const params = { market: simMarket }
+      const params = { market: simMarket, ...riskParams() }
       if (simTickers.trim()) params.tickers = simTickers.trim()
       const r = await client.post('/api/paper-trading/suggest', null, { params })
       setSuggestions(r.data)
@@ -52,11 +102,11 @@ export default function PaperTradingPage() {
   const handleSimRebalance = async () => {
     setBusy(true); setSimResult(null)
     try {
-      const params = { mode: 'meta', market: simMarket }
+      const params = { mode: 'meta', market: simMarket, ...riskParams() }
       if (simTickers.trim()) params.tickers = simTickers.trim()
       const r = await client.post('/api/paper-trading/rebalance', null, { params })
       setSimResult(r.data)
-      await refreshSim()
+      await Promise.all([refreshSim(), loadInsights(simMarket)])
     } catch (e) {
       setSimResult({ ok: false, note: e.response?.data?.detail || 'Rebalance failed' })
     } finally { setBusy(false) }
@@ -65,11 +115,15 @@ export default function PaperTradingPage() {
   const refreshAlpaca = () => Promise.all([
     client.get('/api/paper-trading/alpaca/status').then(r => setAlpaca(r.data)).catch(() => {}),
     client.get('/api/paper-trading/alpaca/portfolio').then(r => setAlpacaPf(r.data)).catch(() => {}),
+    loadPortfolioAnalytics(),
   ])
 
   useEffect(() => {
-    Promise.all([refreshAlpaca(), refreshSim()]).finally(() => setLoading(false))
-    // RL runs power the "single model" rebalance mode
+    Promise.all([refreshAlpaca(), refreshSim(), loadInsights(), loadPortfolioAnalytics()])
+      .finally(() => setLoading(false))
+    client.get('/api/auth/me')
+      .then(r => setAlpacaConfigured(!!r.data.alpaca_configured))
+      .catch(() => {})
     client.get('/api/train/runs').then(r => {
       const rl = r.data.filter(x => ['ppo','a2c','ddpg','td3','sac'].includes(x.algorithm)
                                     && x.status === 'done')
@@ -78,13 +132,19 @@ export default function PaperTradingPage() {
     }).catch(() => {})
   }, [])
 
+  useEffect(() => {
+    loadInsights(insightMarket)
+  }, [insightMarket])
+
   const handleAlpacaRebalance = async () => {
     setBusy(true); setAlpacaResult(null)
     try {
-      const params = alpacaMode === 'meta' ? { mode: 'meta' } : { mode: 'rl', run_id: modelRunId }
+      const params = alpacaMode === 'meta'
+        ? { mode: 'meta', sizing_method: sizingMethod, use_brackets: useBrackets }
+        : { mode: 'rl', run_id: modelRunId }
       const r = await client.post('/api/paper-trading/alpaca/rebalance', null, { params })
       setAlpacaResult(r.data)
-      await refreshAlpaca()
+      await Promise.all([refreshAlpaca(), loadTradeLog(), loadInsights()])
     } catch (e) {
       setAlpacaResult({ ok: false, note: e.response?.data?.detail || 'Alpaca rebalance failed' })
     } finally { setBusy(false) }
@@ -98,7 +158,59 @@ export default function PaperTradingPage() {
 
   return (
     <div>
-      <h1 className="text-2xl font-semibold text-gray-900 mb-1">Paper Trading</h1>
+      <div className="flex flex-wrap items-start justify-between gap-4 mb-6">
+        <div>
+          <h1 className="text-2xl font-semibold text-white mb-1">Paper Trading</h1>
+          <p className="text-sm text-gray-400">
+            Your simulator and Alpaca paper account are private. AI signals are shared across users.
+          </p>
+        </div>
+        <div className="flex items-center gap-2">
+          <select
+            value={insightMarket}
+            onChange={(e) => setInsightMarket(e.target.value)}
+            className="bg-gray-900/80 border border-white/10 rounded-lg px-3 py-1.5 text-xs text-gray-300"
+          >
+            <option value="us">Insights: US</option>
+            <option value="egx">Insights: EGX</option>
+          </select>
+          {aiConfidence.pct != null && (
+            <div className="text-right px-3 py-1.5 rounded-lg border border-white/10 bg-gray-900/60">
+              <p className="text-[10px] text-gray-500 uppercase">AI Confidence</p>
+              <p className={`text-sm font-bold ${
+                aiConfidence.label === 'HIGH' ? 'text-emerald-400' : aiConfidence.label === 'MEDIUM' ? 'text-amber-400' : 'text-red-400'
+              }`}>
+                {aiConfidence.pct}% · {aiConfidence.label}
+              </p>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <InsightsDashboard
+        signals={signals}
+        regime={regime}
+        metaStatus={metaStatus}
+        weights={weights}
+        market={insightMarket}
+      />
+
+      <PortfolioIntelligence
+        analytics={portfolioAnalytics}
+        source={portfolioSource}
+        onSourceChange={setPortfolioSource}
+      />
+
+      {!alpacaConfigured && (
+        <div className="mb-6 p-4 rounded-xl border border-amber-200 bg-amber-50 text-amber-900 text-sm">
+          Alpaca paper keys are not set for your account.{' '}
+          <Link to="/app/settings" className="font-medium text-amber-800 underline">
+            Add keys in Settings
+          </Link>{' '}
+          to rebalance a real Alpaca paper portfolio.
+        </div>
+      )}
+
       <p className="text-sm text-gray-500 mb-6">US (DOW 30) via Alpaca real fills · Egyptian market (EGX) via simulated session</p>
 
       {/* Simulated session — market + ticker picker (US & EGX) */}
@@ -141,6 +253,37 @@ export default function PaperTradingPage() {
             Auto-trade: {autoEnabled ? 'ON' : 'OFF'}
           </button>
         </div>
+
+        {/* Risk & portfolio controls (#1 sizing · #2 optimization · #3 regime) */}
+        <div className="flex flex-wrap items-end gap-3 mb-3 p-3 rounded-lg bg-gray-50 border border-gray-100">
+          <label className="text-[11px] text-gray-500">
+            Allocation
+            <select value={sizingMethod} onChange={e => setSizingMethod(e.target.value)}
+              className="block mt-0.5 border border-gray-300 rounded-lg px-2 py-1.5 text-sm">
+              <option value="risk">ATR risk-based</option>
+              <option value="risk_parity">Risk parity</option>
+              <option value="min_variance">Min variance</option>
+              <option value="max_sharpe">Max Sharpe</option>
+              <option value="inverse_vol">Inverse vol</option>
+              <option value="conviction">Conviction</option>
+            </select>
+          </label>
+          <label className="text-[11px] text-gray-500">
+            Risk / trade %
+            <input type="number" step="0.25" min="0.1" max="5" value={riskPerTrade}
+              onChange={e => setRiskPerTrade(e.target.value)}
+              className="block mt-0.5 w-20 border border-gray-300 rounded-lg px-2 py-1.5 text-sm" />
+          </label>
+          <label className="text-[11px] text-gray-500">
+            Max position %
+            <input type="number" step="5" min="5" max="100" value={maxPosition}
+              onChange={e => setMaxPosition(e.target.value)}
+              className="block mt-0.5 w-20 border border-gray-300 rounded-lg px-2 py-1.5 text-sm" />
+          </label>
+          <span className="text-[11px] text-gray-400 max-w-[220px]">
+            Positions sized by volatility (ATR stop) with per-name, sector &amp; leverage caps.
+          </span>
+        </div>
         {autoEnabled && (
           <p className="text-[11px] text-emerald-700 mb-2">
             Automated: the scheduler will rebalance this session weekly with the same risk controls.
@@ -153,13 +296,21 @@ export default function PaperTradingPage() {
                 <div className="font-medium text-violet-800 mb-1">
                   Advisory · {suggestions.regime} regime — review and click Rebalance to apply
                 </div>
+                <div className="flex flex-wrap gap-2 mb-2 text-[10px] text-violet-700">
+                  {suggestions.sizing_method && <span className="px-1.5 py-0.5 rounded bg-violet-100 border border-violet-200">method: {suggestions.sizing_method}</span>}
+                  {suggestions.vol_regime?.vol_regime && <span className="px-1.5 py-0.5 rounded bg-violet-100 border border-violet-200">vol: {suggestions.vol_regime.vol_regime} (×{suggestions.vol_regime.risk_scale})</span>}
+                  {suggestions.gross_exposure != null && <span className="px-1.5 py-0.5 rounded bg-violet-100 border border-violet-200">invested: {(suggestions.gross_exposure*100).toFixed(0)}%</span>}
+                  {suggestions.avg_correlation != null && <span className="px-1.5 py-0.5 rounded bg-violet-100 border border-violet-200">avg corr: {suggestions.avg_correlation}</span>}
+                </div>
                 <div className="flex flex-wrap gap-1.5">
                   {suggestions.recommendations.map((r) => (
-                    <span key={r.ticker} className={`px-2 py-0.5 rounded border text-[11px] ${
+                    <span key={r.ticker}
+                      title={r.stop_price ? `entry $${r.entry} · stop $${r.stop_price} · target $${r.take_profit}` : undefined}
+                      className={`px-2 py-0.5 rounded border text-[11px] ${
                       r.action === 'BUY' ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
                       : r.action === 'SELL' ? 'bg-red-100 text-red-700 border-red-200'
                       : 'bg-gray-100 text-gray-600 border-gray-200'}`}>
-                      {r.ticker} {r.action}{r.target_weight > 0 ? ` ${(r.target_weight * 100).toFixed(0)}%` : ''}{r.stop_loss ? ' ⛔' : ''}
+                      {r.ticker} {r.action}{r.target_weight > 0 ? ` ${(r.target_weight * 100).toFixed(0)}%` : ''}{r.stop_price ? ' 🛡' : ''}{r.stop_loss ? ' ⛔' : ''}
                     </span>
                   ))}
                 </div>
@@ -264,8 +415,8 @@ export default function PaperTradingPage() {
         <div className="flex flex-wrap items-center gap-2 mb-3">
           <select value={alpacaMode} onChange={e => setAlpacaMode(e.target.value)}
             className="border border-gray-300 rounded-lg px-3 py-2 text-sm">
-            <option value="rl">Single RL model</option>
-            <option value="meta">Meta-learner ensemble (all 7)</option>
+            <option value="meta">Meta-learner ensemble (recommended)</option>
+            <option value="rl">Advanced: single RL model</option>
           </select>
           {alpacaMode === 'rl' && (
             <select value={modelRunId} onChange={e => setModelRunId(e.target.value)}
@@ -282,6 +433,13 @@ export default function PaperTradingPage() {
                 )
               })}
             </select>
+          )}
+          {alpacaMode === 'meta' && (
+            <label className="flex items-center gap-1.5 text-xs text-gray-600">
+              <input type="checkbox" checked={useBrackets}
+                onChange={e => setUseBrackets(e.target.checked)} />
+              Bracket orders (auto stop + target)
+            </label>
           )}
           <button onClick={handleAlpacaRebalance}
             disabled={busy || !alpaca?.configured || (alpacaMode === 'rl' && !modelRunId)}
@@ -338,6 +496,8 @@ export default function PaperTradingPage() {
           </div>
         )}
       </div>
+
+      <RichTradeJournal tradeLog={tradeLog} onRefresh={loadTradeLog} />
 
     </div>
   )

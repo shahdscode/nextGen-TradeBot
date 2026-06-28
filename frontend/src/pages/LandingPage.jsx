@@ -13,11 +13,6 @@ const FEATURES = [
     icon: '🧩',
   },
   {
-    title: 'FinCast Forecasting',
-    desc: 'A fine-tuned time-series foundation model forecasts 5-minute price paths with quantile bands.',
-    icon: '🔮',
-  },
-  {
     title: 'Explainable Signals',
     desc: 'Every BUY/HOLD/SELL card carries SHAP feature attribution and calibrated confidence.',
     icon: '🔍',

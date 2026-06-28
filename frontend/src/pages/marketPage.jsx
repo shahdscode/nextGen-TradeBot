@@ -1,7 +1,6 @@
 import { useState, useEffect } from 'react'
 import client from '../api/client'
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer,
-         ComposedChart, Area, ReferenceLine } from 'recharts'
+import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer } from 'recharts'
 
 const changeStyle = (pct) =>
   pct > 0 ? 'text-emerald-600' : pct < 0 ? 'text-red-500' : 'text-gray-500'
@@ -17,52 +16,6 @@ export default function MarketPage() {
   const [loadingCandles, setLoadingCandles] = useState(false)
   const dataSource = quote?.source || candles[0]?.source || overview[0]?.source
 
-  // ── FinCast forecast ───────────────────────────────────────────────────────
-  const [fcStatus, setFcStatus] = useState(null)     // {ready: bool}
-  const [fcLoading, setFcLoading] = useState(false)
-  const [fcResult, setFcResult] = useState(null)
-  const [fcError, setFcError] = useState(null)
-
-  useEffect(() => {
-    client.get('/api/fincast/status').then(r => setFcStatus(r.data)).catch(() => setFcStatus({ ready: false }))
-  }, [])
-
-  const runForecast = async () => {
-    if (!selectedTicker) return
-    setFcLoading(true); setFcResult(null); setFcError(null)
-    try {
-      const post = await client.post('/api/fincast/forecast', null,
-        { params: { ticker: selectedTicker, market } })
-      if (post.data.cached && post.data.result) { setFcResult(post.data.result); return }
-      const jobId = post.data.job_id
-      for (let i = 0; i < 40; i++) {
-        await new Promise(r => setTimeout(r, 3000))
-        const { data } = await client.get(`/api/fincast/forecast/${jobId}`)
-        if (data.status === 'done') { setFcResult(data.result); return }
-        if (data.status === 'failed') { setFcError(data.error || 'Forecast failed'); return }
-      }
-      setFcError('Timed out waiting for forecast')
-    } catch (e) {
-      setFcError(e.response?.data?.detail || 'Forecast request failed')
-    } finally { setFcLoading(false) }
-  }
-
-  // Build a combined series: recent 5-min actual closes + forecast cone appended.
-  // Use the 5-min history the model actually consumed (fcResult.history) so the
-  // actual and forecast portions share the same time scale.
-  const forecastChartData = (() => {
-    if (!fcResult?.ok) return []
-    const histCloses = fcResult.history?.length ? fcResult.history : candles.slice(-40).map(c => c.close)
-    const hist = histCloses.map((close, i) => ({ i, close }))
-    const start = hist.length
-    const fc = fcResult.mean.map((m, j) => ({
-      i: start + j, mean: m, band: [fcResult.q10[j], fcResult.q90[j]],
-    }))
-    // bridge: anchor the forecast to the last actual close
-    if (hist.length) fc.unshift({ i: start - 1, mean: hist[hist.length - 1].close, band: [hist[hist.length - 1].close, hist[hist.length - 1].close] })
-    return [...hist, ...fc]
-  })()
-
   useEffect(() => {
     setLoadingOverview(true)
     client.get('/api/market/overview', { params: { market } })
@@ -73,7 +26,6 @@ export default function MarketPage() {
 
   const selectTicker = (ticker) => {
     setSelectedTicker(ticker)
-    setFcResult(null); setFcError(null)
     setLoadingCandles(true)
     Promise.allSettled([
       client.get(`/api/market/candles/${ticker}`, { params: { period: '3mo', interval: '1d' } }),
@@ -202,48 +154,6 @@ export default function MarketPage() {
               <p className="text-sm text-gray-400 text-center py-8">No data</p>
             )}
           </div>
-
-          {/* FinCast forecast */}
-          {fcStatus?.ready && (
-            <div className="bg-white border border-violet-200 rounded-xl p-4">
-              <div className="flex items-center justify-between mb-3">
-                <div className="flex items-center gap-2">
-                  <h3 className="text-sm font-medium text-gray-700">FinCast Forecast</h3>
-                  <span className="text-[10px] text-violet-700 bg-violet-50 border border-violet-200 px-1.5 py-0.5 rounded">
-                    {fcResult?.horizon || 60}-step · {fcStatus.model || 'fincast'}
-                  </span>
-                </div>
-                <button onClick={runForecast} disabled={fcLoading || !selectedTicker}
-                  className="px-3 py-1.5 text-xs rounded-lg bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50">
-                  {fcLoading ? 'Forecasting…' : `Forecast ${selectedTicker || ''}`}
-                </button>
-              </div>
-              {fcError && <p className="text-xs text-red-600 mb-2">{fcError}</p>}
-              {fcResult?.ok ? (
-                <>
-                  <ResponsiveContainer width="100%" height={200}>
-                    <ComposedChart data={forecastChartData}>
-                      <XAxis dataKey="i" tick={{ fontSize: 10, fill: '#9ca3af' }} />
-                      <YAxis tick={{ fontSize: 10, fill: '#9ca3af' }} domain={['auto', 'auto']} width={55} />
-                      <Tooltip contentStyle={{ background: '#111827', border: '1px solid #374151', borderRadius: 8 }}
-                        labelStyle={{ color: '#9ca3af', fontSize: 11 }} />
-                      {fcResult?.history?.length &&
-                        <ReferenceLine x={fcResult.history.length - 1} stroke="#a78bfa" strokeDasharray="3 3" />}
-                      <Area dataKey="band" stroke="none" fill="#8b5cf6" fillOpacity={0.15} />
-                      <Line dataKey="close" stroke="#10b981" strokeWidth={2} dot={false} name="actual" />
-                      <Line dataKey="mean" stroke="#8b5cf6" strokeWidth={2} dot={false} name="forecast" />
-                    </ComposedChart>
-                  </ResponsiveContainer>
-                  <p className="text-[11px] text-gray-400 mt-1">
-                    Green = recent actual close · purple = forecast mean · band = q10–q90.
-                    Last ${fcResult.last_close} → mean ${fcResult.mean[fcResult.mean.length - 1]} in {fcResult.horizon} steps.
-                  </p>
-                </>
-              ) : !fcLoading && (
-                <p className="text-xs text-gray-400">Click “Forecast” to run the finetuned FinCast model (first run loads the model, ~a few seconds).</p>
-              )}
-            </div>
-          )}
 
           {/* News sentiment */}
           {news && (

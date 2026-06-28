@@ -17,13 +17,17 @@ const adminLinks = [
   { to: `${APP}/compare`,        label: 'Compare',                 section: 'Analysis' },
   { to: `${APP}/publish`,        label: 'Publish',                 section: 'Analysis' },
   { to: `${APP}/paper-trading`,  label: 'Paper Trading',           section: 'Analysis' },
+  { to: `${APP}/home`,           label: 'Command Center',          section: 'User App' },
 ]
 
 const userLinks = [
-  { to: `${APP}/signals`,      label: 'Signals',      end: true },
+  { to: `${APP}/home`,         label: 'Home',           end: true },
+  { to: `${APP}/signals`,      label: 'Signals' },
   { to: `${APP}/market`,       label: 'Market' },
   { to: `${APP}/leaderboard`,  label: 'Leaderboard' },
   { to: `${APP}/simulator`,    label: 'Simulator' },
+  { to: `${APP}/paper-trading`, label: 'Paper Trading' },
+  { to: `${APP}/settings`,     label: 'Settings' },
 ]
 
 const navClass = ({ isActive }, compact = false) =>
