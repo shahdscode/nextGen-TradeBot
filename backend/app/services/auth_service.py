@@ -120,3 +120,8 @@ def require_admin(credentials: Optional[HTTPAuthorizationCredentials] = Depends(
     if user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Admin access required")
     return user
+
+
+def get_user_id(user: User) -> str:
+    """Stable user primary key for tenancy scoping."""
+    return str(user.id)

@@ -106,6 +106,7 @@ class BacktestResponse(BaseModel):
     rl_sanity: Optional[Dict[str, Any]] = None
     overfitting_report: Optional[Dict[str, Any]] = None
     regime_analysis: Optional[Dict[str, Any]] = None
+    fundamental_attribution: Optional[List[Dict[str, Any]]] = None
     significance_tests: Optional[Dict[str, Any]] = None
     methodology_notes: Optional[Dict[str, Any]] = None
     data_source: Optional[str] = None

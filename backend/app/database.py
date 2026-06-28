@@ -72,6 +72,7 @@ class User(Base):
 class Job(Base):
     __tablename__ = "jobs"
     id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=True, index=True)  # NULL = system/scheduler job
     type = Column(String)
     status = Column(String, default="pending")
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -101,6 +102,7 @@ class Run(Base):
 class Backtest(Base):
     __tablename__ = "backtests"
     id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=True, index=True)
     run_id = Column(String)
     status = Column(String, default="pending")
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -144,6 +146,7 @@ class PaperSession(Base):
     """Persistent paper trading session — survives server restarts."""
     __tablename__ = "paper_sessions"
     id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=True, index=True)
     run_id = Column(String, nullable=True)
     symbols = Column(JSON, default=list)
     timeframe = Column(String, default="M15")
@@ -176,6 +179,40 @@ class ModelPerformanceScore(Base):
     created_at   = Column(DateTime, default=datetime.utcnow)
 
 
+class TradeLog(Base):
+    """
+    Explainable record of every trade DECISION the engine acts on.
+
+    One row per ticker per rebalance that produced a BUY or SELL. Stores not
+    just what was traded but WHY — the meta probability, per-model signals,
+    regime, volatility regime, sizing rationale (weight, stop, target, risk),
+    and a snapshot of key indicators — so any trade can be audited after the
+    fact and the AI's behavior is transparent.
+    """
+    __tablename__ = "trade_logs"
+    id            = Column(String, primary_key=True)
+    session_id    = Column(String, nullable=True)          # paper session / broker
+    venue         = Column(String, nullable=True)          # "sim" | "alpaca"
+    market        = Column(String, default="us")
+    ticker        = Column(String, nullable=False)
+    action        = Column(String, nullable=False)         # "BUY" | "SELL"
+    shares        = Column(Float,  nullable=True)
+    price         = Column(Float,  nullable=True)
+    weight        = Column(Float,  nullable=True)          # target weight of equity
+    # ── rationale ──
+    meta_prob     = Column(Float,  nullable=True)          # calibrated probability
+    regime        = Column(String, nullable=True)          # BULL | BEAR | SIDEWAYS
+    vol_regime    = Column(String, nullable=True)          # HIGH | NORMAL | LOW
+    sizing_method = Column(String, nullable=True)
+    stop_price    = Column(Float,  nullable=True)
+    take_profit   = Column(Float,  nullable=True)
+    risk_dollars  = Column(Float,  nullable=True)
+    model_signals = Column(JSON,   nullable=True)          # {xgb, lstm, ppo, ...}
+    indicators    = Column(JSON,   nullable=True)          # {rsi_14, macd, atr, ...}
+    reason        = Column(String, nullable=True)          # human-readable summary
+    created_at    = Column(DateTime, default=datetime.utcnow)
+
+
 _LEGACY_MIGRATIONS = [
     ("users", "alpaca_api_key TEXT"),
     ("users", "alpaca_api_secret TEXT"),
@@ -184,6 +221,9 @@ _LEGACY_MIGRATIONS = [
     ("runs", "market TEXT DEFAULT 'us'"),
     ("backtests", "initial_capital DOUBLE PRECISION DEFAULT 1000000.0"),
     ("paper_sessions", "auto_enabled BOOLEAN DEFAULT FALSE"),
+    ("paper_sessions", "user_id TEXT"),
+    ("backtests", "user_id TEXT"),
+    ("jobs", "user_id TEXT"),
 ]
 
 _LEGACY_MIGRATIONS_SQLITE = [
@@ -194,6 +234,9 @@ _LEGACY_MIGRATIONS_SQLITE = [
     ("runs", "market TEXT DEFAULT 'us'"),
     ("backtests", "initial_capital REAL DEFAULT 1000000.0"),
     ("paper_sessions", "auto_enabled INTEGER DEFAULT 0"),
+    ("paper_sessions", "user_id TEXT"),
+    ("backtests", "user_id TEXT"),
+    ("jobs", "user_id TEXT"),
 ]
 
 
@@ -230,3 +273,4 @@ def create_tables():
         for table, col_def in migrations:
             _add_column_if_missing(conn, table, col_def)
     ModelPerformanceScore.__table__.create(bind=engine, checkfirst=True)
+    TradeLog.__table__.create(bind=engine, checkfirst=True)

@@ -34,6 +34,8 @@ class TokenResponse(BaseModel):
 
 @router.post("/register")
 def register(req: RegisterRequest):
+    if req.role != "admin" and not settings.allow_public_register:
+        raise HTTPException(status_code=403, detail="Public registration is disabled")
     if req.role == "admin":
         if req.admin_secret != settings.jwt_secret_key[:16]:
             raise HTTPException(status_code=403, detail="Invalid admin secret")
