@@ -8,10 +8,8 @@ pydantic-settings==2.3.4
 python-dotenv==1.0.1
 finrl==0.3.7
 stable-baselines3==2.3.2
-# torch 2.12.1 + transformers 4.46.3 are required by the FinCast engine (peft 0.19.1
-# DoRA adapter); verified compatible with FinRL/SB3/FinBERT. Do NOT pin torch back to
-# 2.3.x or transformers to 4.41 — that breaks FinCast model loading
-# (torch.distributed.tensor / EncoderDecoderCache).
+# torch 2.12.1 + transformers 4.46.3: versions verified compatible with the
+# FinRL/SB3 RL stack and FinBERT/AraBERT sentiment on the deployed server.
 torch==2.12.1
 numpy==1.26.4
 pandas==2.2.2
@@ -31,11 +29,8 @@ shap==0.45.1
 optuna==3.6.1
 hmmlearn==0.3.2
 PyWavelets==1.6.0
-# Sentiment (English FinBERT + Arabic AraBERT) — also used by FinCast (peft 0.19.1
-# needs transformers >= 4.43; keep at 4.46.3, do not downgrade).
+# Sentiment (English FinBERT + Arabic AraBERT)
 transformers==4.46.3
-peft==0.19.1
-accelerate>=1.0
 # News
 requests==2.32.3
 # Parquet step-log support (optional but recommended for performance)
