@@ -188,7 +188,9 @@ def _rl_holdings(featured: pd.DataFrame, algo: str, model_path: str,
 def generate_meta_allocation(initial_cash: float = 100_000.0,
                              market: str = "us",
                              tickers: Optional[List[str]] = None,
-                             top_k: int = 10) -> Dict[str, Any]:
+                             top_k: int = 10,
+                             risk_config: Optional[dict] = None,
+                             sizing_method: str = "risk") -> Dict[str, Any]:
     """
     Full meta-learner allocation on live data for a market (US or EGX).
 
@@ -311,36 +313,110 @@ def generate_meta_allocation(initial_cash: float = 100_000.0,
         regime_label = "BEAR" if regime_bear else ("BULL" if regime_bull else "SIDEWAYS")
         defensive = bool(regime_bear)
 
-        # ── Allocate ∝ meta probability among BUY stocks (prob > 0.5) ────────
+        # ── Pick BUY candidates: prob > 0.5, top-K by conviction ──────────────
         latest_close = dict(zip(latest["tic"], latest["close"].astype(float)))
+        latest_atr = dict(zip(latest["tic"], latest["atr"].astype(float)))
         buys = {} if defensive else {t: p for t, p in meta_prob.items() if p > 0.5}
         # Top-K cap: concentrate capital in the highest-conviction names instead of
         # spreading thinly across the whole universe (reduces over-diversification,
         # signal noise, and rebalance churn).
         if top_k and len(buys) > top_k:
             buys = dict(sorted(buys.items(), key=lambda kv: kv[1], reverse=True)[:top_k])
-        wsum = sum(buys.values())
-        target, prices, signals = {}, {}, {}
+
+        # ── Volatility-based position sizing + risk limits ────────────────────
+        # Replaces naive prob-proportional weighting: each position is sized so a
+        # stop-out loses a fixed % of equity (ATR stop), then capped per-name,
+        # per-sector, and by gross exposure. Returns stops/targets for brackets.
+        from app.services.risk_sizing_service import (
+            RiskConfig, size_positions, DOW30_SECTORS, volatility_regime,
+        )
+        # ── Regime-driven risk posture (#3) ───────────────────────────────────
+        # Scale per-trade risk and gross exposure by the current volatility
+        # regime: shrink in turbulent markets, expand in calm ones. Directional
+        # regime (BEAR→cash) is already handled above.
+        turb_series = (featured.groupby("date")["turbulence"].mean().tolist()
+                       if "turbulence" in featured.columns else None)
+        mean_vix_z = (float(latest["vix_zscore"].mean())
+                      if market == "us" and "vix_zscore" in latest.columns else None)
+        vol_reg = volatility_regime(turb_series, vix_zscore=mean_vix_z)
+        cfg = RiskConfig.from_dict(risk_config)
+        scale = vol_reg["risk_scale"]
+        cfg.risk_per_trade_pct *= scale
+        # Expand/shrink exposure but never introduce leverage unless the caller
+        # explicitly raised max_gross_exposure above 1.0.
+        hard_ceiling = max(1.0, cfg.max_gross_exposure)
+        cfg.max_gross_exposure = min(cfg.max_gross_exposure * scale, hard_ceiling)
+
+        # Portfolio optimization (#2): unless sizing_method == "risk" (pure
+        # ATR risk-based), compute correlation-aware target weights so we don't
+        # over-concentrate in names that move together, then let the risk engine
+        # cap/stop them.
+        portfolio = None
+        target_weights = None
+        if sizing_method and sizing_method.lower() != "risk" and buys:
+            from app.services.portfolio_service import optimize_weights
+            portfolio = optimize_weights(
+                tickers=list(buys.keys()),
+                price_history=featured[["date", "tic", "close"]],
+                method=sizing_method,
+                conviction=buys,
+            )
+            target_weights = portfolio["weights"]
+
+        sized = size_positions(
+            candidates=list(buys.keys()),
+            prices=latest_close,
+            atr=latest_atr,
+            equity=initial_cash,
+            conviction=buys,
+            sectors=DOW30_SECTORS if market == "us" else None,
+            config=cfg,
+            target_weights=target_weights,
+        )
+        positions = sized["positions"]
+
+        target, prices, signals, stops = {}, {}, {}, {}
         for t in tics:
             px = latest_close.get(t, 0.0)
             prices[t] = round(px, 4)
-            if t in buys and wsum > 0 and px > 0:
-                dollars = initial_cash * (buys[t] / wsum)
-                target[t] = round(dollars / px, 4)
+            if t in positions:
+                target[t] = positions[t]["shares"]
                 signals[t] = "BUY"
+                stops[t] = {"stop_price": positions[t]["stop_price"],
+                            "take_profit": positions[t]["take_profit"]}
             else:
                 target[t] = 0.0
                 signals[t] = "SELL" if (defensive or meta_prob[t] < 0.45) else "HOLD"
 
+        # ── Per-ticker explainability snapshot (#4): model votes + indicators ──
+        model_signals = {t: {
+            "xgb": round(xgb_sig.get(t, 0.5), 4), "lstm": round(lstm_sig.get(t, 0.5), 4),
+            "ppo": round(rl_sig["ppo"].get(t, 0.5), 4), "a2c": round(rl_sig["a2c"].get(t, 0.5), 4),
+            "ddpg": round(rl_sig["ddpg"].get(t, 0.5), 4), "td3": round(rl_sig["td3"].get(t, 0.5), 4),
+            "sac": round(rl_sig["sac"].get(t, 0.5), 4),
+        } for t in tics}
+        _ind_cols = ["rsi_14", "macd", "atr", "price_mom_20", "vix_zscore"]
+        latest_indexed = latest.set_index("tic")
+        indicators = {}
+        for t in tics:
+            if t in latest_indexed.index:
+                row = latest_indexed.loc[t]
+                indicators[t] = {c: round(float(row[c]), 4) for c in _ind_cols if c in row}
+
         msg = (f"BEAR regime — defensive: holding cash on {len(tics)} {market.upper()} names "
                f"as of {latest_date.date()}") if defensive else \
-              f"Meta-learner holds {len(buys)}/{len(tics)} {market.upper()} stocks as of {latest_date.date()}"
+              (f"Meta-learner holds {sized['n_positions']}/{len(tics)} {market.upper()} stocks "
+               f"({sized['gross_exposure']:.0%} invested) as of {latest_date.date()}")
         return {
             "ok": True, "as_of": str(latest_date.date()), "tickers": tics,
             "target": target, "prices": prices, "signals": signals,
+            "stops": stops, "sizing": sized, "portfolio": portfolio,
+            "sizing_method": sizing_method,
+            "model_signals": model_signals, "indicators": indicators,
             "meta_prob": {t: round(p, 4) for t, p in meta_prob.items()},
             "algorithm": "meta_learner", "market": market,
             "regime": regime_label, "defensive": defensive,
+            "vol_regime": vol_reg,
             "message": msg,
         }
     except Exception as exc:

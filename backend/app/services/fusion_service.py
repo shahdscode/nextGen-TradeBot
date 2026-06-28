@@ -23,6 +23,63 @@ logger = logging.getLogger(__name__)
 CONFIDENCE_THRESHOLD         = 0.55   # default (US) suppress threshold
 TURBULENCE_SUPPRESS_PERCENTILE = 90   # BUY suppression above this turbulence percentile
 
+
+def production_fusion_flags(db_session=None) -> Dict[str, Any]:
+    """
+    Resolve which fusion mode to use in scheduled / production signal generation.
+    Checks for meta-learner artifact and EWMA tracker initialisation.
+    """
+    from pathlib import Path
+    from app.config import settings
+
+    meta_path = Path(settings.models_dir) / "meta_learner.pkl"
+    cal_path = Path(settings.models_dir) / "calibrator.pkl"
+    use_meta = meta_path.is_file()
+    use_ewma = False
+    if db_session is not None:
+        try:
+            from app.database import ModelPerformanceScore
+            from app.services.ewma_tracker_service import MODEL_KEYS, initialize_tracker
+            initialize_tracker(db_session)
+            n = (
+                db_session.query(ModelPerformanceScore)
+                .filter(ModelPerformanceScore.model_key.in_(MODEL_KEYS))
+                .count()
+            )
+            use_ewma = n >= len(MODEL_KEYS)
+        except Exception as exc:
+            logger.debug("EWMA readiness check failed: %s", exc)
+    return {
+        "use_meta_learner": use_meta,
+        "meta_learner_path": str(meta_path) if use_meta else None,
+        "calibrator_path": str(cal_path) if cal_path.is_file() else None,
+        "use_adaptive_weights": use_ewma and not use_meta,
+    }
+
+
+def meta_learner_status(db_session=None) -> Dict[str, Any]:
+    """Public status payload for GET /api/ml/meta/status."""
+    flags = production_fusion_flags(db_session)
+    ewma_init = False
+    if db_session is not None:
+        try:
+            from app.database import ModelPerformanceScore
+            from app.services.ewma_tracker_service import MODEL_KEYS
+            n = (
+                db_session.query(ModelPerformanceScore)
+                .filter(ModelPerformanceScore.model_key.in_(MODEL_KEYS))
+                .count()
+            )
+            ewma_init = n >= len(MODEL_KEYS)
+        except Exception:
+            pass
+    return {
+        "loaded": flags["use_meta_learner"],
+        "path": flags["meta_learner_path"],
+        "ewma_initialized": ewma_init,
+        "calibrator_path": flags["calibrator_path"],
+    }
+
 # Per-market action bands. US keeps the conservative defaults. EGX models are
 # genuinely lower-confidence (no strong out-of-sample edge — see OOF eval), so
 # without a lower band every EGX signal is suppressed and users see an empty
@@ -386,6 +443,7 @@ def generate_full_signal(
     xgb_prob_override:  Optional[float] = None,
     lstm_prob_override: Optional[float] = None,
     shap_features_override: Optional[List[Dict]] = None,
+    vix_zscore: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Full signal generation pipeline for one ticker.
@@ -393,6 +451,19 @@ def generate_full_signal(
     """
     regime    = get_current_regime(market)
     sentiment = fetch_and_score(ticker)
+
+    if vix_zscore is None and market == "us":
+        try:
+            from app.services.live_trading_service import _latest_featured
+            import pandas as pd
+            featured, latest_date = _latest_featured(market)
+            row = featured[(featured["tic"] == ticker) &
+                           (pd.to_datetime(featured["date"]) == latest_date)]
+            if not row.empty and "vix_zscore" in row.columns:
+                vix_zscore = float(row["vix_zscore"].iloc[0])
+        except Exception:
+            pass
+    vix_z = float(vix_zscore or 0.0)
 
     # ── XGBoost ──────────────────────────────────────────────────────────────
     xgb_prob = 0.5 if xgb_prob_override is None else float(xgb_prob_override)
@@ -445,6 +516,7 @@ def generate_full_signal(
         regime=regime, sentiment_score=sentiment.get("score", 0.0),
         use_meta_learner=use_meta_learner, meta_learner_path=meta_learner_path,
         use_adaptive_weights=use_adaptive_weights, db_session=db_session,
+        vix_zscore=vix_z,
     )
 
     guardrails = apply_risk_guardrails(fused["confidence"], regime, market)
