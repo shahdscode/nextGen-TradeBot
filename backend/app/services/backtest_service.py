@@ -3,7 +3,7 @@ Backtest service with full academic reality layers:
   1. Trading friction  — volatility-scaled slippage + commission
   2. Position limits   — max % capital per stock, cooldown days
   3. Benchmark baselines — Buy&Hold SP500, SMA 20/50, 12-1 Momentum, Equal-Weight, Random
-  4. Extended metrics  — Sortino, Calmar, Profit Factor, Exposure, Turnover
+  4. Extended metrics  — Sortino, Calmar, Profit Factor, trade-day frequency, Turnover
   5. Rolling walk-forward analysis — sliding 63-day windows, consistency stats
   6. Stress tests      — 2×costs, −30% crash, 1-day delay
   7. RL sanity checks  — overtrading, action distribution, turnover
@@ -313,42 +313,85 @@ def run_random_baseline(
     start: str, end: str, initial_capital: float,
     commission_pct: float = 0.001, slippage_pct: float = 0.001,
     seed: int = 42,
+    tickers: Optional[List[str]] = None,
+    n_hold: int = 10,
+    rebalance_days: int = 21,
 ) -> Dict[str, Any]:
-    """Random 5%-daily-flip strategy — minimum bar the RL agent must clear."""
+    """
+    Monthly-rebalanced random stock picker from the same universe as the RL agent.
+
+    Previous version flipped SPY long/cash with 5% daily probability — in a bull
+    market that stayed ~fully invested with occasional cash, inheriting index beta
+    and sometimes beating the agent on Sharpe. This version is a true no-skill
+    stock-selection bar: random equal-weight subset, same friction model.
+    """
+    from app.services.live_trading_service import LIVE_TICKERS, _download_live
+
+    universe = sorted({t.strip().upper() for t in (tickers or LIVE_TICKERS) if t})
+    if not universe:
+        return {}
+    rng = np.random.default_rng(seed)
+    n_hold = max(1, min(n_hold, len(universe)))
+
     try:
-        import yfinance as yf
-        df = yf.download("^GSPC", start=start, end=end, progress=False, auto_adjust=True)
-        if df.empty:
+        raw = _download_live(universe, start, end)
+        raw["d"] = pd.to_datetime(raw["date"]).dt.strftime("%Y-%m-%d")
+        pivot = raw.pivot(index="d", columns="tic", values="close").sort_index()
+        if pivot.empty or len(pivot) < 10:
             return {}
-        closes = df["Close"].values.flatten()
-        dates  = df.index.strftime("%Y-%m-%d").tolist()
-        rng = np.random.default_rng(seed)
+        dates = pivot.index.tolist()
+        available = [c for c in pivot.columns if pivot[c].notna().sum() >= 10]
+        if len(available) < n_hold:
+            return {}
 
-        cash, shares, in_pos = float(initial_capital), 0.0, False
+        holdings: Dict[str, float] = {}
+        cash = float(initial_capital)
         account_values = [float(initial_capital)]
+        last_rebal = -rebalance_days
 
-        for i in range(1, len(closes)):
-            price = float(closes[i])
-            if rng.random() < 0.05:
-                if not in_pos:
-                    eff = _buy_price(price, commission_pct, slippage_pct)
-                    shares = cash / eff;  cash = 0.0;  in_pos = True
-                else:
-                    eff = _sell_price(price, commission_pct, slippage_pct)
-                    cash = shares * eff;  shares = 0.0;  in_pos = False
-            account_values.append(round(cash + shares * price, 2))
+        for i, d in enumerate(dates):
+            prices = {
+                t: float(pivot.loc[d, t])
+                for t in available
+                if pd.notna(pivot.loc[d, t]) and float(pivot.loc[d, t]) > 0
+            }
+            pv = cash + sum(holdings.get(t, 0.0) * prices.get(t, 0.0) for t in holdings)
+
+            if i == 0 or (i - last_rebal) >= rebalance_days:
+                # Liquidate
+                for t, sh in list(holdings.items()):
+                    px = prices.get(t, 0.0)
+                    if px > 0 and sh > 0:
+                        cash += sh * _sell_price(px, commission_pct, slippage_pct)
+                holdings = {}
+
+                pick = list(rng.choice(available, size=n_hold, replace=False))
+                pv = cash
+                friction = pv * (commission_pct + slippage_pct) * 2
+                investable = max(0.0, pv - friction)
+                cash = 0.0
+                w = investable / n_hold
+                for t in pick:
+                    px = prices.get(t, 0.0)
+                    if px > 0:
+                        eff = _buy_price(px, commission_pct, slippage_pct)
+                        holdings[t] = w / eff
+                last_rebal = i
+                pv = cash + sum(holdings.get(t, 0.0) * prices.get(t, 0.0) for t in holdings)
+
+            account_values.append(round(pv, 2))
 
         daily_returns = _compute_daily_returns(account_values)
         metrics = _compute_metrics(account_values, daily_returns, initial_capital)
         return {
-            "account_value": account_values, "dates": dates, "metrics": metrics,
-            "strategy": "random_timing_long_only",
+            "account_value": account_values,
+            "dates": dates,
+            "metrics": metrics,
+            "strategy": "random_portfolio_equal_weight",
             "note": (
-                "Long-only random TIMING on the S&P 500 (5% daily flip → ~20-day avg holding). "
-                "In an up-trending market this inherits most of the market drift, so its Sharpe "
-                "is close to buy-and-hold — NOT a zero-alpha no-skill bar. It tests whether the "
-                "agent beats random entry/exit while long, not whether it beats a market-neutral "
-                "coin-flip. A long/short sign-flip baseline would sit near zero."
+                f"No-skill baseline: each month pick {n_hold} random stocks from the "
+                f"same {len(available)}-name universe, equal-weight, with identical "
+                f"commission + slippage. Not SPY market-timing (which inherits index beta)."
             ),
         }
     except Exception:
@@ -519,7 +562,8 @@ def run_meta_backtest(backtest_id, run, test_start, test_end,
                         cash -= cost; shares[t] += dshares
                         trades.append({"date": d, "ticker": t, "action": "buy",
                                        "shares": round(dshares, 4), "price": round(px[t], 2),
-                                       "effective_price": round(eff, 4)})
+                                       "effective_price": round(eff, 4),
+                                       "technical_score": round(prob.get((d, t), 0.5), 4)})
                 else:
                     eff = _sell_price(px[t], commission_pct, slippage_pct)
                     cash += -dshares * eff; shares[t] += dshares
@@ -553,6 +597,9 @@ def run_meta_backtest(backtest_id, run, test_start, test_end,
         "stress_tests":    _run_stress_scenarios(account_values, dates, initial_capital, commission_pct, slippage_pct, seed),
         "rl_sanity":       _rl_sanity_checks(trades, account_values, dates),
         "regime_analysis": _regime_analysis(daily_returns, dates, trades),
+        "fundamental_attribution": build_fundamental_attribution(
+            trades, test_start=test_start, test_end=test_end, signal_map=prob,
+        ),
         "data_source":     "meta_learner_ensemble",
         "data_quality":    {"live_prices": True,
                             "message": f"Meta-learner ensemble — 7 base signals per stock, "
@@ -781,7 +828,10 @@ def run_backtest(
     sma_base      = run_sma_crossover_baseline(test_start, test_end, initial_capital, commission_pct, slippage_pct)
     momentum_base = run_momentum_baseline(test_start, test_end, initial_capital, commission_pct, slippage_pct)
     eq_weight_base = run_equal_weight_baseline(test_start, test_end, initial_capital, commission_pct, slippage_pct)
-    rand_base     = run_random_baseline(test_start, test_end, initial_capital, commission_pct, slippage_pct, seed)
+    rand_base     = run_random_baseline(
+        test_start, test_end, initial_capital, commission_pct, slippage_pct, seed,
+        tickers=tickers,
+    )
 
     # ── Rolling walk-forward analysis ────────────────────────────────────────
     walk_forward = _walk_forward_rolling(account_values, dates, initial_capital)
@@ -805,6 +855,7 @@ def run_backtest(
     # ── Distribution stats + bootstrap CI ───────────────────────────────────
     # Done after baselines so these heavier stats don't slow sub-period loops
     metrics.update(_distribution_stats(daily_returns))
+    metrics.update(_compute_benchmark_relative_metrics(daily_returns, dates, benchmark, metrics))
 
     # ── Regime analysis ──────────────────────────────────────────────────────
     regime_analysis = _regime_analysis(daily_returns, dates, trades)
@@ -865,6 +916,9 @@ def run_backtest(
         "overfitting_report":    overfitting_report,
         "regime_analysis":       regime_analysis,
         "significance_tests":    significance_tests,
+        "fundamental_attribution": build_fundamental_attribution(
+            trades, test_start=test_start, test_end=test_end,
+        ),
         "methodology_notes": {
             "slippage_model":        f"Almgren-Chriss: slip = base + η×σ×√(Q/(V·T)), T={EXECUTION_HORIZON_DAYS}d, η=0.14. Rolling ADV; urgency premium when partial.",
             "execution_model":       "1-bar delay: signal at close(T), fill at close(T+1). Participation: per asset, per calendar day, per side (buy/sell), cumulative ADV cap.",
@@ -875,7 +929,7 @@ def run_backtest(
             "bootstrap_resamples":   1000,
             "ci_level":              0.95,
             "dm_test":               "Diebold-Mariano with Newey-West HAC SE (lags=floor(n^(1/3)))",
-            "regime_window":         "20-day rolling vol + trend; high-vol threshold = 1.5× median",
+            "regime_window":         "20-day rolling vol + trend; independent tags incl. VIX z>1 & earnings calendar",
         },
         "data_source":           data_source,
         "data_quality":          data_quality,
@@ -1544,7 +1598,13 @@ def _run_stress_scenarios(
             "metrics": _compute_metrics(crashed, dr2, initial_capital),
         },
         "execution_delay": {
-            "label": "1-Day Execution Delay",
+            "label": "Simplified Delay Sensitivity",
+            "note": (
+                "Sensitivity check only: daily returns are shifted by one bar. "
+                "This is NOT a full execution replay (no re-simulation of fills, "
+                "slippage, or position sizing). Improved performance here does not "
+                "imply alpha from delayed execution."
+            ),
             "account_value": [round(v, 2) for v in delayed],
             "dates": dates[:len(delayed)],
             "metrics": _compute_metrics(delayed, dr3, initial_capital),
@@ -1906,20 +1966,60 @@ def _distribution_stats(returns: List[float]) -> Dict[str, Any]:
 
 # ── Regime analysis ───────────────────────────────────────────────────────────
 
+def _is_earnings_season(date_str: str) -> bool:
+    """US earnings clusters: late Jan/Apr/Jul/Oct and early following month."""
+    try:
+        from datetime import datetime
+        d = datetime.strptime(str(date_str)[:10], "%Y-%m-%d")
+        m, day = d.month, d.day
+        if m in (1, 4, 7, 10) and day >= 10:
+            return True
+        if m in (2, 5, 8, 11) and day <= 14:
+            return True
+    except ValueError:
+        pass
+    return False
+
+
+def _regime_day_tags(
+    roll_vol: float,
+    roll_trend: float,
+    med_vol: float,
+    vix_z: Optional[float],
+    date_str: str,
+    sideways_thresh: float = 0.0002,
+) -> List[str]:
+    """Independent regime tags — a day may belong to multiple categories."""
+    tags: List[str] = []
+    if abs(roll_trend) < sideways_thresh:
+        tags.append("sideways")
+    elif roll_trend < 0:
+        tags.append("bear")
+    else:
+        tags.append("bull")
+
+    if roll_vol < 0.5 * med_vol:
+        tags.append("low_volatility")
+    elif roll_vol > 1.5 * med_vol:
+        tags.append("high_volatility")
+
+    if vix_z is not None and vix_z > 1.0:
+        tags.append("high_vix")
+    if _is_earnings_season(date_str):
+        tags.append("earnings_season")
+    return tags
+
+
 def _regime_analysis(
     daily_returns: List[float],
     dates: List[str],
     trades: List[Dict],
 ) -> Dict[str, Any]:
     """
-    Label each day with a market regime using rolling 20-day vol + trend:
-      - high_volatility : vol > 1.5 × median (overrides direction)
-      - bear            : 20-day trend negative
-      - low_volatility  : vol < 0.5 × median, positive trend
-      - bull            : everything else (positive trend, normal vol)
+    Multi-tag regime breakdown (20-day rolling vol + trend + VIX + earnings calendar).
 
+    Each category is evaluated independently — a day can count in Bull AND Low volatility.
     Returns per-regime strategy metrics AND trade-volatility correlation.
-    A high positive correlation (>0.3) flags noise-chasing behaviour.
     """
     arr = np.array(daily_returns, dtype=float)
     n   = len(arr)
@@ -1930,33 +2030,47 @@ def _regime_analysis(
     roll_trend = pd.Series(arr).rolling(20, min_periods=5).mean().fillna(arr.mean()).values
     med_vol    = float(np.median(roll_vol))
 
+    vix_z_by_date: Dict[str, float] = {}
+    if dates:
+        try:
+            from app.services.feature_service import download_vix
+            vix_df = download_vix(dates[0], dates[-1])
+            if vix_df is not None and not vix_df.empty:
+                for _, row in vix_df.iterrows():
+                    vix_z_by_date[str(row["date"])[:10]] = float(row.get("vix_zscore", 0.0))
+        except Exception:
+            pass
+
     LABELS = {
         "bull":            "Bull market",
         "bear":            "Bear market",
-        "high_volatility": "High volatility",
+        "sideways":        "Sideways market",
         "low_volatility":  "Low volatility",
+        "high_volatility": "High volatility",
+        "high_vix":        "High VIX",
+        "earnings_season": "Earnings season",
     }
+    DISPLAY_ORDER = list(LABELS.keys())
 
-    regimes: List[str] = []
+    day_tags: List[List[str]] = []
     for i in range(n):
-        v, t = float(roll_vol[i]), float(roll_trend[i])
-        if v > 1.5 * med_vol:
-            regimes.append("high_volatility")
-        elif t < 0:
-            regimes.append("bear")
-        elif v < 0.5 * med_vol:
-            regimes.append("low_volatility")
-        else:
-            regimes.append("bull")
+        d_str = dates[i] if i < len(dates) else ""
+        tags = _regime_day_tags(
+            float(roll_vol[i]),
+            float(roll_trend[i]),
+            med_vol,
+            vix_z_by_date.get(d_str[:10]) if d_str else None,
+            d_str,
+        )
+        day_tags.append(tags)
 
     perf: Dict[str, Any] = {}
-    for name in LABELS:
-        idxs = [i for i, r in enumerate(regimes) if r == name]
+    for name in DISPLAY_ORDER:
+        idxs = [i for i, tags in enumerate(day_tags) if name in tags]
         if not idxs:
             continue
         sub    = arr[idxs]
         sharpe = float(sub.mean() / sub.std() * np.sqrt(252)) if sub.std() > 1e-10 else 0.0
-        # Intra-regime max drawdown
         cum    = np.cumprod(1.0 + sub)
         peak   = np.maximum.accumulate(cum)
         max_dd = float(np.max((peak - cum) / np.where(peak > 0, peak, 1)))
@@ -1970,7 +2084,6 @@ def _regime_analysis(
             "max_drawdown":      round(max_dd, 4),
         }
 
-    # Trade-volatility correlation
     trade_dates = set(t.get("date", "") for t in trades)
     flags = np.array(
         [1.0 if (i < len(dates) and dates[i] in trade_dates) else 0.0 for i in range(n)]
@@ -1988,9 +2101,16 @@ def _regime_analysis(
 
     return {
         "regime_performance":    perf,
-        "regime_distribution":   {r: regimes.count(r) for r in LABELS if r in regimes},
+        "regime_display_order":  DISPLAY_ORDER,
+        "regime_distribution":   {name: sum(1 for tags in day_tags if name in tags) for name in LABELS},
         "trade_vol_correlation": tv_corr,
         "trade_vol_note":        tv_note,
+        "methodology": (
+            "Direction: 20-day mean return (bull/bear/sideways). "
+            "Volatility: 20-day rolling std vs median (low/high). "
+            "High VIX: VIX z-score > 1.0. Earnings: US calendar windows (late Jan/Apr/Jul/Oct). "
+            "Categories are independent — days may appear in multiple rows."
+        ),
     }
 
 
@@ -2077,6 +2197,79 @@ def _significance_tests(
 
 # ── Metrics computation ───────────────────────────────────────────────────────
 
+def _compute_benchmark_relative_metrics(
+    agent_daily: List[float],
+    agent_dates: List[str],
+    benchmark: Optional[Dict[str, Any]],
+    agent_metrics: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Excess return and information ratio vs buy-and-hold S&P 500."""
+    if not benchmark or not agent_metrics:
+        return {}
+    bh_m = benchmark.get("metrics") or {}
+    agent_tr = float(agent_metrics.get("total_return") or 0)
+    bh_tr = float(bh_m.get("total_return") or 0)
+    excess = agent_tr - bh_tr
+    cagr_agent = float(agent_metrics.get("cagr") or 0)
+    cagr_bh = float(bh_m.get("cagr") or 0)
+
+    out: Dict[str, Any] = {
+        "excess_return_vs_buy_hold": round(excess, 4),
+        "alpha_vs_buy_hold": round(cagr_agent - cagr_bh, 4),
+        "buy_hold_total_return": round(bh_tr, 4),
+    }
+
+    b_dates = benchmark.get("dates") or []
+    b_av = benchmark.get("account_value") or []
+    if len(b_av) < 2 or not agent_dates or len(agent_daily) < 5:
+        out["information_ratio_vs_buy_hold"] = None
+        out["tracking_error_vs_buy_hold"] = None
+        out["beta_vs_buy_hold"] = None
+        return out
+
+    b_daily_map: Dict[str, float] = {}
+    b_rets = _compute_daily_returns(b_av)
+    for i, d in enumerate(b_dates[1:]):
+        if i < len(b_rets):
+            b_daily_map[str(d)[:10]] = b_rets[i]
+
+    active: List[float] = []
+    agent_aligned: List[float] = []
+    bench_aligned: List[float] = []
+    for i, d in enumerate(agent_dates[1:]):
+        if i >= len(agent_daily):
+            break
+        br = b_daily_map.get(str(d)[:10])
+        if br is not None:
+            ar = agent_daily[i]
+            active.append(ar - br)
+            agent_aligned.append(ar)
+            bench_aligned.append(br)
+
+    if len(active) > 5 and float(np.std(active)) > 1e-10:
+        te_ann = float(np.std(active, ddof=1) * np.sqrt(252))
+        out["tracking_error_vs_buy_hold"] = round(te_ann, 4)
+        out["information_ratio_vs_buy_hold"] = round(
+            float(np.mean(active) / np.std(active, ddof=1) * np.sqrt(252)), 4
+        )
+    else:
+        out["tracking_error_vs_buy_hold"] = None
+        out["information_ratio_vs_buy_hold"] = None
+
+    if len(agent_aligned) > 5:
+        a = np.array(agent_aligned, dtype=float)
+        b = np.array(bench_aligned, dtype=float)
+        var_b = float(np.var(b, ddof=1))
+        if var_b > 1e-12:
+            out["beta_vs_buy_hold"] = round(float(np.cov(a, b)[0, 1] / var_b), 4)
+        else:
+            out["beta_vs_buy_hold"] = None
+    else:
+        out["beta_vs_buy_hold"] = None
+
+    return out
+
+
 def _compute_daily_returns(account_values: List[float]) -> List[float]:
     if len(account_values) < 2:
         return []
@@ -2085,6 +2278,353 @@ def _compute_daily_returns(account_values: List[float]) -> List[float]:
         if account_values[i - 1] != 0 else 0.0
         for i in range(1, len(account_values))
     ]
+
+
+def _compute_trade_return_stats(
+    trades: List[Dict],
+    closing_prices: Optional[Dict[str, float]] = None,
+) -> Dict[str, Any]:
+    """
+    FIFO lot matching per ticker (share-accurate).
+
+    Previous logic kept one buy price per ticker and treated any sell as a full
+    round-trip, which broke under partial rebalances (many sells unmatched →
+    bogus negative avg_trade_return despite positive portfolio return).
+    """
+    from collections import defaultdict, deque
+
+    lots: Dict[str, deque] = defaultdict(deque)  # ticker -> deque[[shares, px], ...]
+    last_px: Dict[str, float] = {}
+    closed_rets: List[float] = []
+    closed_notionals: List[float] = []
+
+    for t in sorted(trades, key=lambda x: x.get("date", "")):
+        tk = (t.get("ticker") or "").strip()
+        act = (t.get("action") or "").lower()
+        px = float(t.get("effective_price") or t.get("price") or 0)
+        sh = abs(float(t.get("shares") or 0))
+        if not tk or px <= 0 or sh <= 1e-12:
+            continue
+        last_px[tk] = px
+
+        if act == "buy":
+            lots[tk].append([sh, px])
+        elif act == "sell":
+            remaining = sh
+            while remaining > 1e-9 and lots[tk]:
+                lot_sh, lot_px = lots[tk][0]
+                matched = min(remaining, lot_sh)
+                if lot_px > 0:
+                    ret = (px - lot_px) / lot_px
+                    closed_rets.append(ret)
+                    closed_notionals.append(matched * lot_px)
+                lot_sh -= matched
+                remaining -= matched
+                if lot_sh <= 1e-9:
+                    lots[tk].popleft()
+                else:
+                    lots[tk][0][0] = lot_sh
+
+    # Mark open lots to closing prices (or last trade price) for completeness
+    mark_px = dict(last_px)
+    if closing_prices:
+        mark_px.update({k: float(v) for k, v in closing_prices.items() if v})
+    open_rets: List[float] = []
+    open_notionals: List[float] = []
+    for tk, dq in lots.items():
+        fpx = mark_px.get(tk, 0.0)
+        if fpx <= 0:
+            continue
+        for lot_sh, lot_px in dq:
+            if lot_sh > 1e-9 and lot_px > 0:
+                open_rets.append((fpx - lot_px) / lot_px)
+                open_notionals.append(lot_sh * lot_px)
+
+    def _wmean(rets: List[float], weights: List[float]) -> Optional[float]:
+        if not rets:
+            return None
+        if not weights or sum(weights) <= 0:
+            return float(np.mean(rets))
+        return float(np.average(rets, weights=weights))
+
+    realized = _wmean(closed_rets, closed_notionals)
+    incl_open = _wmean(closed_rets + open_rets, closed_notionals + open_notionals)
+
+    return {
+        "avg_trade_return": realized,
+        "avg_trade_return_incl_open": incl_open,
+        "trade_win_rate": round(float(np.mean(np.array(closed_rets) > 0)), 4) if closed_rets else None,
+        "n_closed_lots": len(closed_rets),
+        "n_open_lots": len(open_rets),
+        "n_unmatched_sell_shares": 0,  # reserved; FIFO consumes sells against lots
+    }
+
+
+def refresh_trade_metrics(
+    metrics: Optional[Dict[str, Any]],
+    trades: Optional[List[Dict]],
+    n_days: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Recompute trade-level metrics from the trade log (fixes stale stored results)."""
+    out = dict(metrics or {})
+    if not trades:
+        return out
+
+    trade_stats = _compute_trade_return_stats(trades)
+    if trade_stats.get("avg_trade_return") is not None:
+        out["avg_trade_return"] = round(trade_stats["avg_trade_return"], 4)
+    if trade_stats.get("avg_trade_return_incl_open") is not None:
+        out["avg_trade_return_incl_open"] = round(trade_stats["avg_trade_return_incl_open"], 4)
+    if trade_stats.get("trade_win_rate") is not None:
+        out["trade_win_rate"] = trade_stats["trade_win_rate"]
+    out["n_closed_lots"] = trade_stats.get("n_closed_lots", 0)
+    out["n_open_lots"] = trade_stats.get("n_open_lots", 0)
+
+    if n_days and n_days > 0:
+        trade_dates = set(t.get("date", "") for t in trades)
+        active = round(float(min(len(trade_dates) / n_days, 1.0)), 4)
+        out["active_days_pct"] = active
+        out["exposure_pct"] = active
+
+    if "win_rate" in out and "daily_win_rate" not in out:
+        out["daily_win_rate"] = out["win_rate"]
+
+    return out
+
+
+def _decision_from_score(score: float) -> str:
+    if score > 0.60:
+        return "BUY"
+    if score < 0.40:
+        return "SELL"
+    return "HOLD"
+
+
+def _technical_score_from_row(row: Dict[str, Any]) -> float:
+    rsi = float(row.get("rsi_14", 50) or 50)
+    mom = float(row.get("price_mom_20", 0) or 0)
+    rsi_s = max(0.0, min(1.0, rsi / 100.0))
+    mom_s = 0.5 + float(np.tanh(mom * 5)) * 0.5
+    return round(0.5 * rsi_s + 0.5 * mom_s, 4)
+
+
+def _fundamental_score_from_info(info: Dict[str, Any]) -> float:
+    parts: List[float] = []
+    pe = info.get("trailingPE")
+    if pe is not None and 0 < float(pe) < 120:
+        parts.append(max(0.0, 1.0 - abs(float(pe) - 20.0) / 50.0))
+    pm = info.get("profitMargins")
+    if pm is not None:
+        parts.append(max(0.0, min(1.0, float(pm) * 2.5 + 0.35)))
+    rg = info.get("revenueGrowth")
+    if rg is not None:
+        parts.append(max(0.0, min(1.0, float(rg) + 0.5)))
+    de = info.get("debtToEquity")
+    if de is not None and float(de) >= 0:
+        parts.append(max(0.0, 1.0 - min(float(de) / 200.0, 1.0)))
+    if not parts:
+        return 0.5
+    return round(float(np.mean(parts)), 4)
+
+
+def _fetch_fundamental_scores(tickers: List[str]) -> Dict[str, float]:
+    scores: Dict[str, float] = {}
+    try:
+        import yfinance as yf
+        for tk in tickers:
+            if not tk or tk.startswith("^"):
+                continue
+            if tk in _FUND_SCORE_CACHE:
+                scores[tk] = _FUND_SCORE_CACHE[tk]
+                continue
+            try:
+                info = yf.Ticker(tk).info or {}
+                val = _fundamental_score_from_info(info)
+                _FUND_SCORE_CACHE[tk] = val
+                scores[tk] = val
+            except Exception:
+                _FUND_SCORE_CACHE[tk] = 0.5
+                scores[tk] = 0.5
+    except Exception:
+        pass
+    return scores
+
+
+_FUND_SCORE_CACHE: Dict[str, float] = {}
+
+
+def _build_feature_lookup(test_start: str, test_end: str, tickers: List[str]) -> Dict[tuple, Dict[str, Any]]:
+    """{(date, ticker): feature_row} for technical scoring at trade time."""
+    lookup: Dict[tuple, Dict[str, Any]] = {}
+    if not tickers:
+        return lookup
+    try:
+        from app.services.feature_service import download_vix, build_features
+        from app.services.live_trading_service import _download_live
+        warmup = (pd.Timestamp(test_start) - pd.Timedelta(days=120)).strftime("%Y-%m-%d")
+        raw = _download_live(tickers, warmup, test_end)
+        vix = download_vix(warmup, test_end)
+        featured = raw.copy()
+        featured["date"] = pd.to_datetime(featured["date"])
+        parts = []
+        for tic in sorted(set(tickers)):
+            try:
+                parts.append(build_features(raw, ticker=tic, vix_df=vix))
+            except Exception:
+                continue
+        if not parts:
+            return lookup
+        fe = pd.concat(parts, ignore_index=True)
+        fe["date"] = pd.to_datetime(fe["date"])
+        fe = fe[(fe["date"] >= test_start) & (fe["date"] <= test_end)]
+        for _, row in fe.iterrows():
+            d = str(row["date"])[:10]
+            tk = str(row.get("tic", "")).strip()
+            if d and tk:
+                lookup[(d, tk)] = row.to_dict()
+    except Exception:
+        pass
+    return lookup
+
+
+def build_fundamental_attribution(
+    trades: List[Dict],
+    test_start: Optional[str] = None,
+    test_end: Optional[str] = None,
+    signal_map: Optional[Dict[tuple, float]] = None,
+) -> List[Dict[str, Any]]:
+    """
+    Per-trade explainability: technical vs fundamental scores and fused decision.
+
+    Technical: ensemble/meta probability when available, else RSI+momentum proxy.
+    Fundamental: yfinance trailing PE, margins, revenue growth, leverage (0–1).
+    Final: 60% technical + 40% fundamental → BUY/HOLD/SELL bands.
+    """
+    if not trades:
+        return []
+
+    tickers = sorted({str(t.get("ticker", "")).strip().upper() for t in trades if t.get("ticker")})
+    fund = _fetch_fundamental_scores(tickers)
+
+    dates = [t.get("date", "")[:10] for t in trades if t.get("date")]
+    t0 = test_start or (min(dates) if dates else "")
+    t1 = test_end or (max(dates) if dates else "")
+    feat_lookup = _build_feature_lookup(t0, t1, tickers) if t0 and t1 else {}
+
+    rows: List[Dict[str, Any]] = []
+    for t in trades:
+        tk = str(t.get("ticker", "")).strip().upper()
+        d = str(t.get("date", ""))[:10]
+        if not tk or not d:
+            continue
+
+        tech = None
+        if signal_map and (d, tk) in signal_map:
+            tech = float(signal_map[(d, tk)])
+        elif t.get("technical_score") is not None:
+            tech = float(t["technical_score"])
+        elif (d, tk) in feat_lookup:
+            tech = _technical_score_from_row(feat_lookup[(d, tk)])
+        else:
+            tech = 0.5
+
+        fund_s = fund.get(tk, 0.5)
+        blended = round(0.6 * tech + 0.4 * fund_s, 4)
+        decision = _decision_from_score(blended)
+
+        rows.append({
+            "date": d,
+            "ticker": tk,
+            "action": t.get("action"),
+            "technical_score": round(tech, 4),
+            "fundamental_score": round(fund_s, 4),
+            "blended_score": blended,
+            "final_decision": decision,
+        })
+    return rows
+
+
+def enrich_backtest_result(result: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Patch stored backtest JSON with corrected labels and recomputed enrichments."""
+    if not result:
+        return {}
+    out = dict(result)
+    trades = out.get("trades") or []
+    dates = out.get("dates") or []
+    daily = out.get("daily_return") or []
+
+    out["metrics"] = refresh_trade_metrics(
+        out.get("metrics"),
+        trades,
+        n_days=len(daily),
+    )
+    if daily and out["metrics"].get("annualized_volatility") is None and len(daily) > 1:
+        merged = dict(out["metrics"])
+        merged["annualized_volatility"] = round(
+            float(np.std(np.array(daily, dtype=float), ddof=1) * np.sqrt(252)), 4
+        )
+        out["metrics"] = merged
+
+    if trades and dates and daily:
+        out["regime_analysis"] = _regime_analysis(daily, dates, trades)
+
+    stress = out.get("stress_tests") or {}
+    delay = stress.get("execution_delay")
+    if delay:
+        delay = dict(delay)
+        delay["label"] = "Simplified Delay Sensitivity"
+        delay.setdefault(
+            "note",
+            "Sensitivity check only: shifts daily returns by one bar — not a full execution replay.",
+        )
+        stress = dict(stress)
+        stress["execution_delay"] = delay
+        out["stress_tests"] = stress
+
+    if trades and not out.get("fundamental_attribution"):
+        dlist = [t.get("date", "")[:10] for t in trades if t.get("date")]
+        out["fundamental_attribution"] = build_fundamental_attribution(
+            trades,
+            test_start=min(dlist) if dlist else None,
+            test_end=max(dlist) if dlist else None,
+        )
+
+    notes = dict(out.get("methodology_notes") or {})
+    notes.setdefault(
+        "trade_day_frequency",
+        "trade_day_frequency / active_days_pct = share of backtest days with ≥1 trade — NOT capital deployed.",
+    )
+    notes.setdefault(
+        "mean_closed_trade_return",
+        "FIFO-matched closed lots; returns use effective_price (commission + slippage per leg).",
+    )
+    out["methodology_notes"] = notes
+
+    benchmark = out.get("benchmark")
+    if benchmark and out.get("metrics") and dates and daily:
+        rel = _compute_benchmark_relative_metrics(daily, dates, benchmark, out["metrics"])
+        merged = dict(out["metrics"])
+        merged.update(rel)
+        out["metrics"] = merged
+
+    # Upgrade legacy SPY random-timing baseline (inflated Sharpe in bull markets)
+    baselines = dict(out.get("baselines") or {})
+    rand = baselines.get("random") or {}
+    if dates and rand.get("strategy") == "random_timing_long_only":
+        tc = out.get("transaction_costs") or {}
+        seed = int(hashlib.sha256(f"{dates[0]}:{dates[-1]}".encode()).hexdigest()[:8], 16)
+        new_rand = run_random_baseline(
+            dates[0], dates[-1],
+            float(out.get("initial_capital") or 1_000_000),
+            float(tc.get("commission_pct") or 0.001),
+            float(tc.get("slippage_pct") or 0.001),
+            seed,
+        )
+        if new_rand:
+            baselines["random"] = new_rand
+            out["baselines"] = baselines
+
+    return out
 
 
 def _compute_metrics(
@@ -2132,6 +2672,7 @@ def _compute_metrics(
 
     win_days  = int(np.sum(returns > 0))
     win_rate  = float(win_days / n_days) if n_days > 0 else 0.0
+    ann_vol   = float(returns.std(ddof=1) * np.sqrt(252)) if n_days > 1 else 0.0
 
     m: Dict[str, Any] = {
         "sharpe":        round(sharpe, 4),
@@ -2140,30 +2681,27 @@ def _compute_metrics(
         "max_drawdown":  round(max_dd, 4),
         "cagr":          round(ann_ret, 4),
         "total_return":  round(total_ret, 4),
+        "annualized_volatility": round(ann_vol, 4),
         "profit_factor": round(float(min(profit_factor, 99.0)), 4),
         "initial_value": round(float(initial_capital), 2),
         "final_value":   round(float(account_values[-1]), 2),
         "win_rate":      round(win_rate, 4),
+        "daily_win_rate": round(win_rate, 4),  # explicit alias — NOT trade win rate
         "win_days":      win_days,
         "loss_days":     int(n_days - win_days),
     }
 
     # Trade-level metrics (only when trade log is available)
     if trades:
-        trade_rets, buy_px = [], {}
-        for t in sorted(trades, key=lambda x: x.get("date", "")):
-            tk, act = t.get("ticker", ""), t.get("action", "")
-            # Always prefer effective_price (includes friction) over raw price.
-            # effective_price is the actual amount paid/received per share in
-            # the simulation; using raw `price` would undercount friction costs.
-            px = t.get("effective_price") or t.get("price", 0)
-            if act == "buy":
-                buy_px[tk] = px
-            elif act == "sell" and tk in buy_px and buy_px[tk] > 0:
-                trade_rets.append((px - buy_px[tk]) / buy_px[tk])
-                del buy_px[tk]
-        if trade_rets:
-            m["avg_trade_return"] = round(float(np.mean(trade_rets)), 4)
+        trade_stats = _compute_trade_return_stats(trades)
+        if trade_stats.get("avg_trade_return") is not None:
+            m["avg_trade_return"] = round(trade_stats["avg_trade_return"], 4)
+        if trade_stats.get("avg_trade_return_incl_open") is not None:
+            m["avg_trade_return_incl_open"] = round(trade_stats["avg_trade_return_incl_open"], 4)
+        if trade_stats.get("trade_win_rate") is not None:
+            m["trade_win_rate"] = trade_stats["trade_win_rate"]
+        m["n_closed_lots"] = trade_stats.get("n_closed_lots", 0)
+        m["n_open_lots"] = trade_stats.get("n_open_lots", 0)
 
         # "active_days_pct" = fraction of days on which a trade occurred (trade
         # FREQUENCY), NOT capital deployed. Previously mislabeled "exposure_pct",

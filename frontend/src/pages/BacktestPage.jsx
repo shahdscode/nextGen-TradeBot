@@ -34,15 +34,16 @@ function BaselinesTable({ agentMetrics, baselines = {} }) {
     { key: 'sma',          label: 'SMA 20/50',    metrics: baselines.sma_crossover?.metrics,    color: 'text-gray-700' },
     { key: 'momentum',     label: 'Momentum',     metrics: baselines.momentum?.metrics,         color: 'text-indigo-600' },
     { key: 'equal_weight', label: 'Equal-Wt',     metrics: baselines.equal_weight?.metrics,     color: 'text-teal-600' },
-    { key: 'random',       label: 'Random',       metrics: baselines.random?.metrics,           color: 'text-gray-400' },
+    { key: 'random',       label: 'Random Portfolio', metrics: baselines.random?.metrics, note: baselines.random?.note, color: 'text-gray-400' },
   ]
   const rows = [
     { label: 'Total Return', fn: (m) => fmtPct(m?.total_return),  better: 'higher' },
     { label: 'CAGR',         fn: (m) => fmtPct(m?.cagr),          better: 'higher' },
     { label: 'Sharpe',       fn: (m) => fmtRatio(m?.sharpe),      better: 'higher' },
+    { label: 'Ann. Volatility', fn: (m) => fmtPct(m?.annualized_volatility), better: 'lower' },
     { label: 'Sortino',      fn: (m) => fmtRatio(m?.sortino),     better: 'higher' },
     { label: 'Max Drawdown', fn: (m) => fmtPct(m?.max_drawdown),  better: 'lower'  },
-    { label: 'Win Rate',     fn: (m) => fmtPct(m?.win_rate),      better: 'higher' },
+    { label: 'Win Rate',     fn: (m) => fmtPct(m?.daily_win_rate ?? m?.win_rate), better: 'higher' },
     { label: 'Profit Factor',fn: (m) => fmtRatio(m?.profit_factor), better: 'higher' },
   ]
 
@@ -50,8 +51,62 @@ function BaselinesTable({ agentMetrics, baselines = {} }) {
     <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
       <div className="px-4 py-3 border-b border-gray-100 flex items-center gap-2">
         <h2 className="text-sm font-medium text-gray-700">Strategy Benchmarks</h2>
-        <span className="text-xs text-gray-400">RL Agent vs Buy&Hold · SMA 20/50 · 12-1 Momentum · Equal-Weight · Random</span>
+        <span className="text-xs text-gray-400">RL Agent vs Buy&Hold · SMA 20/50 · 12-1 Momentum · Equal-Weight · Random Portfolio</span>
       </div>
+      {(agentMetrics?.excess_return_vs_buy_hold != null
+        || agentMetrics?.information_ratio_vs_buy_hold != null
+        || agentMetrics?.beta_vs_buy_hold != null) && (
+        <div className="px-4 py-2.5 border-b border-gray-100 bg-blue-50/50 flex flex-wrap gap-4">
+          {agentMetrics.excess_return_vs_buy_hold != null && (
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">Excess Return vs Buy &amp; Hold</p>
+              <p className={`text-sm font-semibold ${
+                agentMetrics.excess_return_vs_buy_hold >= 0 ? 'text-green-700' : 'text-red-600'
+              }`}>
+                {fmtPct(agentMetrics.excess_return_vs_buy_hold)}
+                {agentMetrics.buy_hold_total_return != null && (
+                  <span className="text-xs font-normal text-gray-500 ml-1">
+                    ({fmtPct(agentMetrics.total_return)} vs {fmtPct(agentMetrics.buy_hold_total_return)})
+                  </span>
+                )}
+              </p>
+            </div>
+          )}
+          {agentMetrics.alpha_vs_buy_hold != null && (
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">Alpha vs Buy &amp; Hold (CAGR)</p>
+              <p className={`text-sm font-semibold ${
+                agentMetrics.alpha_vs_buy_hold >= 0 ? 'text-green-700' : 'text-red-600'
+              }`}>
+                {fmtPct(agentMetrics.alpha_vs_buy_hold)}
+              </p>
+            </div>
+          )}
+          {agentMetrics.information_ratio_vs_buy_hold != null && (
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">Information Ratio vs B&amp;H</p>
+              <p className="text-sm font-semibold text-gray-800">{fmtRatio(agentMetrics.information_ratio_vs_buy_hold)}</p>
+            </div>
+          )}
+          {agentMetrics.tracking_error_vs_buy_hold != null && (
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">Tracking Error vs B&amp;H</p>
+              <p className="text-sm font-semibold text-gray-800">{fmtPct(agentMetrics.tracking_error_vs_buy_hold)}</p>
+            </div>
+          )}
+          {agentMetrics.beta_vs_buy_hold != null && (
+            <div>
+              <p className="text-[10px] uppercase tracking-wide text-gray-500">Beta vs B&amp;H</p>
+              <p className="text-sm font-semibold text-gray-800">{fmtRatio(agentMetrics.beta_vs_buy_hold)}</p>
+            </div>
+          )}
+        </div>
+      )}
+      {baselines.random?.note && (
+        <p className="px-4 py-2 text-[11px] text-gray-500 border-b border-gray-100 italic">
+          {baselines.random.note}
+        </p>
+      )}
       <div className="overflow-x-auto">
         <table className="w-full text-sm">
           <thead className="bg-gray-50 border-b border-gray-200">
@@ -101,7 +156,7 @@ function StressTestsTable({ base, stress }) {
     { key: 'base',            label: 'Base (no stress)',       metrics: base },
     { key: 'high_costs',      label: stress.high_costs?.label ?? '2× Costs',    metrics: stress.high_costs?.metrics },
     { key: 'crash_scenario',  label: stress.crash_scenario?.label ?? 'Crash',   metrics: stress.crash_scenario?.metrics },
-    { key: 'execution_delay', label: stress.execution_delay?.label ?? '1-Day Delay', metrics: stress.execution_delay?.metrics },
+    { key: 'execution_delay', label: stress.execution_delay?.label ?? 'Simplified Delay Sensitivity', metrics: stress.execution_delay?.metrics, note: stress.execution_delay?.note },
   ]
   return (
     <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
@@ -122,10 +177,13 @@ function StressTestsTable({ base, stress }) {
             </tr>
           </thead>
           <tbody className="divide-y divide-gray-100">
-            {scenarios.map(({ key, label, metrics: m }) => (
+            {scenarios.map(({ key, label, metrics: m, note }) => (
               <tr key={key} className={key === 'base' ? 'bg-gray-50' : 'hover:bg-gray-50'}>
                 <td className={`px-4 py-2.5 text-xs font-medium ${stressColors[key] || 'text-gray-600'}`}>
                   {key === 'base' && <span className="mr-1">↳</span>}{label}
+                  {note && (
+                    <p className="text-[10px] font-normal text-amber-600 mt-0.5 max-w-xs">{note}</p>
+                  )}
                 </td>
                 <td className={`px-4 py-2.5 text-right text-xs ${m?.total_return >= 0 ? 'text-green-600' : 'text-red-600'}`}>
                   {fmtPct(m?.total_return)}
@@ -417,20 +475,28 @@ function ConfidencePanel({ metrics }) {
 // ── Regime analysis panel ─────────────────────────────────────────────────────
 function RegimePanel({ regime }) {
   if (!regime?.regime_performance) return null
-  const entries = Object.entries(regime.regime_performance)
+  const order = regime.regime_display_order ?? Object.keys(regime.regime_performance)
+  const entries = order
+    .filter((key) => regime.regime_performance[key])
+    .map((key) => [key, regime.regime_performance[key]])
   if (!entries.length) return null
   const regimeColors = {
     bull:            'text-green-700',
     bear:            'text-red-700',
-    high_volatility: 'text-amber-700',
+    sideways:        'text-amber-700',
+    high_volatility: 'text-orange-700',
     low_volatility:  'text-blue-600',
+    high_vix:        'text-purple-700',
+    earnings_season: 'text-indigo-700',
   }
   return (
     <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
       <div className="px-4 py-3 border-b border-gray-100 flex items-start justify-between">
         <div>
           <h2 className="text-sm font-medium text-gray-700">Regime Analysis</h2>
-          <p className="text-xs text-gray-400 mt-0.5">20-day rolling vol + trend · performance per market regime</p>
+          <p className="text-xs text-gray-400 mt-0.5">
+            {regime.methodology ?? '20-day rolling vol + trend · independent tags (days may overlap)'}
+          </p>
         </div>
         {regime.trade_vol_correlation != null && (
           <div className="text-right shrink-0">
@@ -480,6 +546,54 @@ function RegimePanel({ regime }) {
           {regime.trade_vol_note}
         </p>
       )}
+    </div>
+  )
+}
+
+// ── Fundamental attribution table ─────────────────────────────────────────────
+function FundamentalAttributionPanel({ rows }) {
+  if (!rows?.length) return null
+  const decisionStyle = {
+    BUY:  'bg-green-100 text-green-800',
+    HOLD: 'bg-amber-100 text-amber-800',
+    SELL: 'bg-red-100 text-red-800',
+  }
+  return (
+    <div className="bg-white border border-gray-200 rounded-xl overflow-hidden">
+      <div className="px-4 py-3 border-b border-gray-100">
+        <h2 className="text-sm font-medium text-gray-700">Fundamental Attribution</h2>
+        <p className="text-xs text-gray-400 mt-0.5">
+          <span className="font-medium text-gray-500">Descriptive only</span> — explains trades after execution;
+          the RL policy is not driven by this table. Technical (model/indicator) vs fundamental (Yahoo Finance ratios), blended 60/40 for readability.
+        </p>
+      </div>
+      <div className="max-h-80 overflow-y-auto">
+        <table className="w-full text-sm">
+          <thead className="bg-gray-50 sticky top-0 border-b border-gray-200">
+            <tr>
+              {['Date', 'Stock', 'Technical', 'Fundamental', 'Final Decision', 'Action'].map((h, i) => (
+                <th key={h} className={`px-4 py-2 text-xs text-gray-500 font-medium ${i === 0 || i === 1 ? 'text-left' : 'text-right'}`}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody className="divide-y divide-gray-100">
+            {rows.map((r, i) => (
+              <tr key={i} className="hover:bg-gray-50">
+                <td className="px-4 py-2 text-xs text-gray-500">{r.date}</td>
+                <td className="px-4 py-2 text-xs font-semibold text-gray-900">{r.ticker}</td>
+                <td className="px-4 py-2 text-right text-xs text-indigo-600 font-medium">{r.technical_score?.toFixed(2) ?? '—'}</td>
+                <td className="px-4 py-2 text-right text-xs text-violet-600 font-medium">{r.fundamental_score?.toFixed(2) ?? '—'}</td>
+                <td className="px-4 py-2 text-right">
+                  <span className={`inline-flex px-2 py-0.5 rounded-full text-xs font-medium ${decisionStyle[r.final_decision] ?? 'bg-gray-100 text-gray-600'}`}>
+                    {r.final_decision}
+                  </span>
+                </td>
+                <td className="px-4 py-2 text-right text-xs text-gray-500 capitalize">{r.action ?? '—'}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
     </div>
   )
 }
@@ -725,92 +839,6 @@ function MethodologyCard({ notes }) {
   )
 }
 
-// ── FinCast contextual-bandit backtest (faithful port of the FinCast notebook) ──
-function FinCastBacktestPanel() {
-  const [ticker, setTicker] = useState('AAPL')
-  const [market, setMarket] = useState('us')
-  const [windows, setWindows] = useState(2000)
-  const [status, setStatus] = useState(null)
-  const [result, setResult] = useState(null)
-  const [busy, setBusy] = useState(false)
-
-  const run = async () => {
-    setBusy(true); setResult(null); setStatus('pending')
-    try {
-      const q = { ticker, market, test_windows: windows, force: true }
-      const r = await client.post('/api/fincast/backtest', null, { params: q })
-      if (r.data.status === 'done') { setResult(r.data.result); setStatus('done'); setBusy(false); return }
-      const jobId = r.data.job_id
-      const timer = setInterval(async () => {
-        try {
-          const p = await client.get(`/api/fincast/backtest/${jobId}`)
-          setStatus(p.data.status)
-          if (p.data.status === 'done') { clearInterval(timer); setResult(p.data.result); setBusy(false) }
-          if (p.data.status === 'failed') { clearInterval(timer); toast.error(p.data.error || 'FinCast backtest failed'); setBusy(false) }
-        } catch { clearInterval(timer); setBusy(false) }
-      }, 5000)
-    } catch (e) {
-      toast.error(e.response?.data?.detail || 'FinCast backtest failed'); setBusy(false); setStatus(null)
-    }
-  }
-
-  const pct = (x) => (x == null ? '—' : `${(x * 100).toFixed(2)}%`)
-  const beat = result && result.edge_vs_buyhold > 0
-
-  return (
-    <div className="bg-white border border-violet-200 rounded-xl p-6 max-w-4xl mb-8">
-      <h2 className="text-sm font-semibold text-gray-900 mb-1">FinCast Backtest — contextual bandit on 5-min forecasts</h2>
-      <p className="text-xs text-gray-500 mb-4">
-        Faithful port of the FinCast notebook: FinCast forecasts each 5-min window; a contextual
-        bandit (BUY/HOLD/SELL) learns with delayed reward over the 60-step horizon; train on the
-        first 70% of windows, evaluate out-of-sample on the rest. 0.15% per-side cost. CPU inference
-        is slow — 2000 windows can take several minutes.
-      </p>
-      <div className="flex flex-wrap items-center gap-2 mb-4">
-        <select value={market} onChange={e => setMarket(e.target.value)} className="border border-gray-300 rounded-lg px-3 py-2 text-sm">
-          <option value="us">US</option><option value="egx">EGX</option>
-        </select>
-        <input value={ticker} onChange={e => setTicker(e.target.value.toUpperCase())}
-          placeholder="AAPL" className="border border-gray-300 rounded-lg px-3 py-2 text-sm w-32" />
-        <select value={windows} onChange={e => setWindows(Number(e.target.value))} className="border border-gray-300 rounded-lg px-3 py-2 text-sm">
-          <option value={400}>400 windows (fast)</option>
-          <option value={1000}>1000 windows</option>
-          <option value={2000}>2000 windows (notebook)</option>
-        </select>
-        <button onClick={run} disabled={busy || !ticker}
-          className="px-4 py-2 text-sm rounded-lg bg-violet-600 text-white hover:bg-violet-700 disabled:opacity-50">
-          {busy ? `Running… (${status})` : 'Run FinCast Backtest'}
-        </button>
-      </div>
-      {result?.ok && (
-        <>
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-3">
-            {[
-              ['OOS return', pct(result.oos_return)],
-              ['Sharpe', result.sharpe_ratio?.toFixed(2)],
-              ['Max drawdown', pct(result.max_drawdown)],
-              ['Edge vs B&H', pct(result.edge_vs_buyhold)],
-              ['Buy & hold', pct(result.buyhold_return)],
-              ['Win rate', pct(result.win_rate)],
-              ['Test trades', result.test_trades],
-              ['Windows', `${result.n_windows} (${result.train_windows} tr)`],
-            ].map(([k, v], i) => (
-              <div key={i} className="bg-gray-50 rounded-lg p-3">
-                <div className="text-xs text-gray-500">{k}</div>
-                <div className={`text-lg font-bold ${k === 'Edge vs B&H' ? (beat ? 'text-green-600' : 'text-red-500') : 'text-gray-900'}`}>{v}</div>
-              </div>
-            ))}
-          </div>
-          <div className="text-xs text-gray-500">
-            actions — BUY {result.action_counts?.BUY}, HOLD {result.action_counts?.HOLD}, SELL {result.action_counts?.SELL}
-            {' · '}model {result.model}
-          </div>
-        </>
-      )}
-    </div>
-  )
-}
-
 // ── Main page ─────────────────────────────────────────────────────────────────
 export default function BacktestPage() {
   const [searchParams] = useSearchParams()
@@ -908,8 +936,6 @@ export default function BacktestPage() {
       <p className="text-sm text-gray-500 mb-6">
         Evaluate a trained agent on historical data with full trading friction and benchmarks
       </p>
-
-      <FinCastBacktestPanel />
 
       {/* ── Config form ── */}
       <div className="bg-white border border-gray-200 rounded-xl p-6 max-w-4xl mb-8">
@@ -1114,6 +1140,9 @@ export default function BacktestPage() {
 
           {/* Regime analysis */}
           <RegimePanel regime={result.regime_analysis} />
+
+          {/* Fundamental attribution */}
+          <FundamentalAttributionPanel rows={result.fundamental_attribution} />
 
           {/* Statistical significance */}
           <SignificanceTable tests={result.significance_tests} />
