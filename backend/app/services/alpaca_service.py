@@ -242,6 +242,89 @@ def _submit_notional(symbol: str, notional: float, side: str) -> Optional[dict]:
         return None
 
 
+def submit_bracket(symbol: str, qty: float, stop_loss: float,
+                   take_profit: float, side: str = "buy") -> Optional[dict]:
+    """
+    Submit a bracket order: a market entry with attached protective stop-loss
+    and take-profit legs. When either is hit, the other is cancelled (OCO).
+    Alpaca brackets require whole-share qty and GTC time-in-force.
+
+    Returns the parent order dict, or None on failure.
+    """
+    q = int(qty)
+    if q <= 0 or not stop_loss or not take_profit or stop_loss <= 0 or take_profit <= 0:
+        return None
+    try:
+        return _post("/orders", {
+            "symbol":        symbol,
+            "qty":           q,
+            "side":          side,
+            "type":          "market",
+            "time_in_force": "gtc",
+            "order_class":   "bracket",
+            "take_profit":   {"limit_price": round(take_profit, 2)},
+            "stop_loss":     {"stop_price":  round(stop_loss, 2)},
+        })
+    except Exception as exc:
+        logger.warning("Alpaca bracket %s %s x%d failed: %s", side, symbol, q, exc)
+        return None
+
+
+def rebalance_with_brackets(targets: Dict[str, dict],
+                            cash_buffer_pct: float = 0.02) -> Dict[str, Any]:
+    """
+    Open bracketed positions toward `targets` and flatten everything else.
+
+    targets: {symbol: {"dollars", "price", "stop_price", "take_profit"}}
+
+    For each target NOT already held, submits a bracket buy sized to
+    qty = floor((1-buffer)·dollars / price) with the model's stop+target
+    attached. Symbols held but not targeted are closed. Already-held targets
+    are left alone so their existing protective legs stand.
+    """
+    acct = get_account()
+    equity = acct["equity"] * (1.0 - max(0.0, min(cash_buffer_pct, 0.5)))
+    held = {p["symbol"]: p for p in get_positions()}
+    is_open = market_is_open()
+    orders, closed, skipped = [], [], []
+
+    for sym in list(held):                       # close unwanted positions first
+        if sym not in targets:
+            try:
+                _request("DELETE", f"/positions/{sym}")
+                closed.append(sym)
+            except Exception:
+                skipped.append(sym)
+
+    for sym, t in targets.items():               # open new bracketed entries
+        if sym in held:
+            continue
+        price = float(t.get("price") or 0.0)
+        dollars = min(float(t.get("dollars") or 0.0), equity)
+        if price <= 0 or dollars <= 0:
+            continue
+        qty = int(dollars / price)
+        if qty < 1:
+            skipped.append(sym)
+            continue
+        o = submit_bracket(sym, qty, t.get("stop_price"), t.get("take_profit"), side="buy")
+        if o:
+            orders.append({"symbol": sym, "side": "buy", "qty": qty,
+                           "stop_loss": t.get("stop_price"),
+                           "take_profit": t.get("take_profit"),
+                           "order_id": o.get("id"), "status": o.get("status")})
+        else:
+            skipped.append(sym)
+
+    return {
+        "ok": True, "market_open": is_open, "order_class": "bracket",
+        "orders": orders, "closed": closed, "skipped": skipped, "n_orders": len(orders),
+        "note": ("Bracket orders submitted; entries fill at next open with stop+target."
+                 if not is_open else "Bracket orders submitted to live paper market."),
+        "account": get_account(),
+    }
+
+
 def rebalance_to_weights(target_weights: Dict[str, float],
                          min_trade_dollars: float = 50.0,
                          cash_buffer_pct: float = 0.02,
