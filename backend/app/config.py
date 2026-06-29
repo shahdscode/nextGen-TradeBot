@@ -41,6 +41,16 @@ class Settings(BaseSettings):
     jwt_secret_key: str = _DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 24  # 24 hours
+    # Email (verification + password reset). When SMTP is unset, emails are
+    # logged to the console (dev fallback) instead of being sent.
+    smtp_host: str = ""
+    smtp_port: int = 587
+    smtp_user: str = ""
+    smtp_password: str = ""
+    smtp_use_tls: bool = True
+    email_from: str = "NextGen TradeBot <no-reply@nextgentradebot.local>"
+    app_base_url: str = "http://localhost:5173"   # used to build verify/reset links
+    require_email_verification: bool = False       # block login until verified when True
     # External data
     newsapi_key: str = ""
     # Market UI: when False, only Yahoo/NewsAPI data (no training CSV or synthetic placeholders)
