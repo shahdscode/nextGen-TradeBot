@@ -1,6 +1,7 @@
 import uuid
+import secrets
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Optional, Tuple
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from app.config import settings
@@ -80,11 +81,84 @@ def create_user(username: str, password: str, role: str = "user", email: str = "
             role=role,
             is_active=True,
             created_at=datetime.utcnow(),
+            email_verified=False,
+            verification_token=(secrets.token_urlsafe(32) if email else None),
         )
         db.add(user)
         db.commit()
         db.refresh(user)
         return user
+    finally:
+        db.close()
+
+
+def verify_email_token(token: str) -> Optional[User]:
+    """Mark a user's email verified given their verification token."""
+    if not token:
+        return None
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.verification_token == token).first()
+        if not user:
+            return None
+        user.email_verified = True
+        user.verification_token = None
+        db.commit()
+        db.refresh(user)
+        return user
+    finally:
+        db.close()
+
+
+def issue_verification_token(username_or_email: str) -> Optional[Tuple[User, str]]:
+    """(Re)issue a verification token for an unverified user. Returns (user, token)."""
+    db = SessionLocal()
+    try:
+        user = (db.query(User)
+                  .filter((User.username == username_or_email) | (User.email == username_or_email))
+                  .first())
+        if not user or not user.email or user.email_verified:
+            return None
+        token = secrets.token_urlsafe(32)
+        user.verification_token = token
+        db.commit()
+        return user, token
+    finally:
+        db.close()
+
+
+def create_password_reset(username_or_email: str) -> Optional[Tuple[User, str]]:
+    """Create a 1-hour reset token for a user. Returns (user, token) or None."""
+    db = SessionLocal()
+    try:
+        user = (db.query(User)
+                  .filter((User.username == username_or_email) | (User.email == username_or_email))
+                  .first())
+        if not user or not user.email:
+            return None
+        token = secrets.token_urlsafe(32)
+        user.reset_token = token
+        user.reset_expires_at = datetime.utcnow() + timedelta(hours=1)
+        db.commit()
+        return user, token
+    finally:
+        db.close()
+
+
+def reset_password_with_token(token: str, new_password: str) -> bool:
+    """Set a new password if the reset token is valid and unexpired."""
+    if not token or not new_password:
+        return False
+    db = SessionLocal()
+    try:
+        user = db.query(User).filter(User.reset_token == token).first()
+        if not user or not user.reset_expires_at or user.reset_expires_at < datetime.utcnow():
+            return False
+        user.hashed_password = hash_password(new_password)
+        user.reset_token = None
+        user.reset_expires_at = None
+        db.commit()
+        return True
     finally:
         db.close()
 

@@ -64,6 +64,11 @@ class User(Base):
     role = Column(String, default="user")  # "admin" | "user"
     is_active = Column(Boolean, default=True)
     created_at = Column(DateTime, default=datetime.utcnow)
+    # Email verification + password reset
+    email_verified = Column(Boolean, default=False)
+    verification_token = Column(String, nullable=True)
+    reset_token = Column(String, nullable=True)
+    reset_expires_at = Column(DateTime, nullable=True)
     # Per-user Alpaca paper-trading credentials (each user trades their own account)
     alpaca_api_key = Column(String, nullable=True)
     alpaca_api_secret = Column(String, nullable=True)
@@ -224,6 +229,10 @@ _LEGACY_MIGRATIONS = [
     ("paper_sessions", "user_id TEXT"),
     ("backtests", "user_id TEXT"),
     ("jobs", "user_id TEXT"),
+    ("users", "email_verified BOOLEAN DEFAULT FALSE"),
+    ("users", "verification_token TEXT"),
+    ("users", "reset_token TEXT"),
+    ("users", "reset_expires_at TIMESTAMP"),
 ]
 
 _LEGACY_MIGRATIONS_SQLITE = [
@@ -237,6 +246,10 @@ _LEGACY_MIGRATIONS_SQLITE = [
     ("paper_sessions", "user_id TEXT"),
     ("backtests", "user_id TEXT"),
     ("jobs", "user_id TEXT"),
+    ("users", "email_verified INTEGER DEFAULT 0"),
+    ("users", "verification_token TEXT"),
+    ("users", "reset_token TEXT"),
+    ("users", "reset_expires_at TIMESTAMP"),
 ]
 
 
