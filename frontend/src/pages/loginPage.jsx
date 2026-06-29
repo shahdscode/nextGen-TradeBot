@@ -72,6 +72,9 @@ export default function LoginPage() {
             </button>
           </form>
           <p className="text-xs text-gray-500 mt-4 text-center">
+            <Link to="/forgot-password" className="text-teal-400 hover:text-teal-300">Forgot password?</Link>
+          </p>
+          <p className="text-xs text-gray-500 mt-2 text-center">
             No account?{' '}
             <Link to="/signup" className="text-teal-400 hover:text-teal-300">Create one</Link>
           </p>
@@ -81,6 +84,13 @@ export default function LoginPage() {
             </p>
           )}
         </div>
+        <p className="text-[11px] text-gray-600 mt-6 text-center">
+          <Link to="/terms" className="hover:text-gray-400">Terms</Link>
+          {' · '}
+          <Link to="/privacy" className="hover:text-gray-400">Privacy</Link>
+          {' · '}
+          <Link to="/disclaimer" className="hover:text-gray-400">Disclaimer</Link>
+        </p>
       </div>
     </div>
   )
