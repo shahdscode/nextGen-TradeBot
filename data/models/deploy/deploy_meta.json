@@ -1,0 +1,32 @@
+{
+  "xgb_holdout_auc": 0.5858,
+  "n_rows": 90078,
+  "features": [
+    "macd",
+    "rsi_30",
+    "rsi_14",
+    "boll_ub",
+    "boll_lb",
+    "bb_width",
+    "close_30_sma",
+    "close_60_sma",
+    "cci_30",
+    "dx_30",
+    "atr",
+    "volume_zscore",
+    "price_mom_5",
+    "price_mom_20",
+    "frac_diff_close",
+    "turbulence",
+    "high_low_range",
+    "gap",
+    "obv_zscore",
+    "ema_cross",
+    "vol_price_corr",
+    "vix_level",
+    "vix_zscore",
+    "price_range_position",
+    "rank_20d_mom"
+  ],
+  "lstm_holdout_auc": 0.5702
+}
