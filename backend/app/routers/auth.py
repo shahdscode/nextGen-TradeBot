@@ -13,8 +13,14 @@ from app.services.email_service import (
     send_verification_email, send_password_reset_email,
 )
 from app.config import settings
+from app.utils.rate_limit import rate_limit
 
 router = APIRouter(prefix="/auth", tags=["auth"])
+
+# Throttles (per client IP, per route) to blunt brute-force / spam.
+_rl_login = rate_limit(max_calls=10, window_seconds=60)
+_rl_register = rate_limit(max_calls=5, window_seconds=300)
+_rl_sensitive = rate_limit(max_calls=5, window_seconds=300)
 
 
 class RegisterRequest(BaseModel):
@@ -38,7 +44,7 @@ class TokenResponse(BaseModel):
 
 
 @router.post("/register")
-def register(req: RegisterRequest):
+def register(req: RegisterRequest, _rl=Depends(_rl_register)):
     if req.role != "admin" and not settings.allow_public_register:
         raise HTTPException(status_code=403, detail="Public registration is disabled")
     if req.role == "admin":
@@ -65,7 +71,7 @@ def register(req: RegisterRequest):
 
 
 @router.post("/login", response_model=TokenResponse)
-def login(req: LoginRequest):
+def login(req: LoginRequest, _rl=Depends(_rl_login)):
     user = authenticate_user(req.username, req.password)
     if not user:
         raise HTTPException(status_code=401, detail="Invalid username or password")
@@ -102,7 +108,7 @@ def verify_email(req: TokenOnly):
 
 
 @router.post("/resend-verification")
-def resend_verification(req: EmailOrUsername):
+def resend_verification(req: EmailOrUsername, _rl=Depends(_rl_sensitive)):
     result = issue_verification_token(req.identifier)
     if result:
         user, token = result
@@ -112,7 +118,7 @@ def resend_verification(req: EmailOrUsername):
 
 
 @router.post("/forgot-password")
-def forgot_password(req: EmailOrUsername):
+def forgot_password(req: EmailOrUsername, _rl=Depends(_rl_sensitive)):
     result = create_password_reset(req.identifier)
     if result:
         user, token = result
@@ -122,7 +128,7 @@ def forgot_password(req: EmailOrUsername):
 
 
 @router.post("/reset-password")
-def reset_password(req: ResetPasswordRequest):
+def reset_password(req: ResetPasswordRequest, _rl=Depends(_rl_sensitive)):
     if len(req.new_password) < 8:
         raise HTTPException(status_code=400, detail="Password must be at least 8 characters")
     if not reset_password_with_token(req.token, req.new_password):
