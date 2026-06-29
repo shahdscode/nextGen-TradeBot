@@ -62,7 +62,10 @@ class Settings(BaseSettings):
     # Deployment / multi-user SaaS
     environment: str = "development"  # development | production
     allow_public_register: bool = True
-    cors_origins: str = "http://localhost:5173,http://localhost:80,http://127.0.0.1:5173"
+    cors_origins: str = (
+        "http://localhost:5173,http://localhost:80,http://127.0.0.1:5173,"
+        "https://nextgen-tradebot-self.vercel.app"
+    )
     seed_admin: bool = False  # set SEED_ADMIN=true to create default admin in production
 
     class Config:
