@@ -110,8 +110,12 @@ def verify_email_token(token: str) -> Optional[User]:
         db.close()
 
 
-def issue_verification_token(username_or_email: str) -> Optional[Tuple[User, str]]:
-    """(Re)issue a verification token for an unverified user. Returns (user, token)."""
+def issue_verification_token(username_or_email: str) -> Optional[Tuple[str, str, str]]:
+    """
+    (Re)issue a verification token for an unverified user.
+    Returns (email, username, token) — primitives read before the session closes
+    to avoid DetachedInstanceError on the caller side.
+    """
     db = SessionLocal()
     try:
         user = (db.query(User)
@@ -121,14 +125,18 @@ def issue_verification_token(username_or_email: str) -> Optional[Tuple[User, str
             return None
         token = secrets.token_urlsafe(32)
         user.verification_token = token
+        email, username = user.email, user.username
         db.commit()
-        return user, token
+        return email, username, token
     finally:
         db.close()
 
 
-def create_password_reset(username_or_email: str) -> Optional[Tuple[User, str]]:
-    """Create a 1-hour reset token for a user. Returns (user, token) or None."""
+def create_password_reset(username_or_email: str) -> Optional[Tuple[str, str, str]]:
+    """
+    Create a 1-hour reset token for a user.
+    Returns (email, username, token) — primitives read before the session closes.
+    """
     db = SessionLocal()
     try:
         user = (db.query(User)
@@ -139,8 +147,9 @@ def create_password_reset(username_or_email: str) -> Optional[Tuple[User, str]]:
         token = secrets.token_urlsafe(32)
         user.reset_token = token
         user.reset_expires_at = datetime.utcnow() + timedelta(hours=1)
+        email, username = user.email, user.username
         db.commit()
-        return user, token
+        return email, username, token
     finally:
         db.close()
 

@@ -111,8 +111,8 @@ def verify_email(req: TokenOnly):
 def resend_verification(req: EmailOrUsername, _rl=Depends(_rl_sensitive)):
     result = issue_verification_token(req.identifier)
     if result:
-        user, token = result
-        send_verification_email(user.email, user.username, token)
+        email, username, token = result
+        send_verification_email(email, username, token)
     # Always generic so we don't leak which accounts exist / are verified.
     return {"ok": True, "message": "If the account exists and is unverified, a new link was sent."}
 
@@ -121,8 +121,8 @@ def resend_verification(req: EmailOrUsername, _rl=Depends(_rl_sensitive)):
 def forgot_password(req: EmailOrUsername, _rl=Depends(_rl_sensitive)):
     result = create_password_reset(req.identifier)
     if result:
-        user, token = result
-        send_password_reset_email(user.email, user.username, token)
+        email, username, token = result
+        send_password_reset_email(email, username, token)
     # Generic response — never reveal whether the account exists.
     return {"ok": True, "message": "If an account exists, a reset link has been sent."}
 
