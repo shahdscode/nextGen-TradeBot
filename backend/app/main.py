@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from app.config import settings
 from app.database import create_tables
 from app import finrl_wrapper
+from app.observability import install as install_observability
 from app.routers import auth, paper_trading, signals, market
 
 # ML/RL routers — only loaded when heavy dependencies are installed
@@ -17,6 +18,11 @@ app = FastAPI(
     description="AI-powered trading signals with XGBoost, LSTM, and FinRL PPO",
     version="2.0.0",
 )
+
+# Structured logging, per-request correlation ids, and a global exception
+# handler (unhandled errors are logged + returned as clean JSON, not a raw
+# stack trace).
+install_observability(app)
 
 _cors = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
 app.add_middleware(

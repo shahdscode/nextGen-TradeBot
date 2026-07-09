@@ -61,6 +61,7 @@ class Settings(BaseSettings):
     slippage_bps: float = 5.0
     # Deployment / multi-user SaaS
     environment: str = "development"  # development | production
+    log_level: str = "INFO"           # DEBUG | INFO | WARNING | ERROR
     allow_public_register: bool = True
     cors_origins: str = (
         "http://localhost:5173,http://localhost:80,http://127.0.0.1:5173,"
