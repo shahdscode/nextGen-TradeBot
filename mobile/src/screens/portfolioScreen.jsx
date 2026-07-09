@@ -4,6 +4,7 @@ import {
   TouchableOpacity, Modal, Pressable, Alert,
 } from 'react-native'
 import Svg, { Polyline } from 'react-native-svg'
+import { Ionicons } from '@expo/vector-icons'
 
 import client from '../api/client'
 import { COLORS, RADIUS } from '../constants/theme'
@@ -26,7 +27,7 @@ function Sparkline({ data, width = 320, height = 90 }) {
   )
 }
 
-export default function PortfolioScreen() {
+export default function PortfolioScreen({ navigation }) {
   const [pf, setPf] = useState(null)
   const [status, setStatus] = useState(null)
   const [loading, setLoading] = useState(true)
@@ -90,13 +91,19 @@ export default function PortfolioScreen() {
           <Text style={styles.title}>Portfolio</Text>
           <Text style={styles.sub}>Alpaca paper account · live · auto-rebalanced weekly</Text>
         </View>
-        {status?.market_open != null && (
-          <View style={[styles.pill, { backgroundColor: status.market_open ? COLORS.greenBg : COLORS.amberBg }]}>
-            <Text style={[styles.pillText, { color: status.market_open ? COLORS.green : COLORS.amber }]}>
-              {status.market_open ? 'MARKET OPEN' : 'MARKET CLOSED'}
-            </Text>
-          </View>
-        )}
+        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+          {status?.market_open != null && (
+            <View style={[styles.pill, { backgroundColor: status.market_open ? COLORS.greenBg : COLORS.amberBg }]}>
+              <Text style={[styles.pillText, { color: status.market_open ? COLORS.green : COLORS.amber }]}>
+                {status.market_open ? 'MARKET OPEN' : 'MARKET CLOSED'}
+              </Text>
+            </View>
+          )}
+          <TouchableOpacity onPress={() => navigation?.navigate('TradeJournal')}
+            hitSlop={8} accessibilityLabel="Trade journal">
+            <Ionicons name="reader-outline" size={22} color={COLORS.teal} />
+          </TouchableOpacity>
+        </View>
       </View>
 
       {loading ? (

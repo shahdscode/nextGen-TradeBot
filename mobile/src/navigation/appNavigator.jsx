@@ -18,6 +18,8 @@ import MarketScreen from '../screens/marketScreen'
 import LeaderboardScreen from '../screens/leaderboardScreen'
 import PortfolioScreen from '../screens/portfolioScreen'
 import ProfileScreen from '../screens/profileScreen'
+import TradeJournalScreen from '../screens/tradeJournalScreen'
+import TradeDetailScreen from '../screens/tradeDetailScreen'
 
 const Stack = createNativeStackNavigator()
 const Tab = createBottomTabNavigator()
@@ -115,7 +117,17 @@ export default function AppNavigator() {
     <NavigationContainer>
       <Stack.Navigator screenOptions={{ headerShown: false }}>
         {user ? (
-          <Stack.Screen name="Main" component={MainTabs} />
+          <>
+            <Stack.Screen name="Main" component={MainTabs} />
+            <Stack.Screen name="TradeJournal" component={TradeJournalScreen}
+              options={{ headerShown: true, title: 'Trade Journal',
+                headerStyle: { backgroundColor: COLORS.bg }, headerTintColor: COLORS.textPrimary,
+                headerShadowVisible: false }} />
+            <Stack.Screen name="TradeDetail" component={TradeDetailScreen}
+              options={{ headerShown: true, title: 'Decision',
+                headerStyle: { backgroundColor: COLORS.bg }, headerTintColor: COLORS.textPrimary,
+                headerShadowVisible: false }} />
+          </>
         ) : (
           <Stack.Screen
             name="Auth"
