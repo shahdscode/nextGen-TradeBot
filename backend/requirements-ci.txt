@@ -1,0 +1,11 @@
+# Minimal deps to run unit tests in CI (no torch/finrl/xgboost needed —
+# the heavy ML libs are lazily imported and not touched by the unit tests).
+numpy==1.26.4
+pandas==2.2.2
+pydantic==2.7.4
+pydantic-settings==2.3.4
+python-dotenv==1.0.1
+sqlalchemy==2.0.31
+pytest>=8.0
+requests>=2.31.0
+psycopg2-binary>=2.9.9
