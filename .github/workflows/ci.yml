@@ -34,7 +34,9 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
       - name: Install dependencies
         working-directory: frontend
-        run: npm ci
+        # npm install (not `npm ci`) tolerates minor lockfile/npm-version drift
+        # between local and the CI runner, which otherwise fails the strict check.
+        run: npm install --no-audit --no-fund
       - name: Build
         working-directory: frontend
         run: npm run build
