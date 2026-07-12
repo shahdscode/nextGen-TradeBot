@@ -131,7 +131,9 @@ def _rebalance_one_session(row, db) -> None:
 
     user = db.query(User).filter(User.id == row.user_id).first() if row.user_id else None
     if user:
-        alpaca_service.use_credentials(user.alpaca_api_key, user.alpaca_api_secret)
+        from app.utils.crypto import decrypt_secret
+        alpaca_service.use_credentials(
+            decrypt_secret(user.alpaca_api_key), decrypt_secret(user.alpaca_api_secret))
 
     cash = float(row.initial_cash or 100_000.0)
     run_id = row.run_id or ""

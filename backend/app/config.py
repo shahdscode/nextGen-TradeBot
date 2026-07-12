@@ -41,6 +41,10 @@ class Settings(BaseSettings):
     jwt_secret_key: str = _DEFAULT_JWT_SECRET
     jwt_algorithm: str = "HS256"
     jwt_expire_minutes: int = 60 * 24  # 24 hours
+    # Fernet key (urlsafe-base64, 32 bytes) for encrypting stored secrets like
+    # per-user Alpaca API keys. If empty, derived from JWT_SECRET_KEY.
+    # Generate: python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
+    secret_encryption_key: str = ""
     # Email (verification + password reset). When SMTP is unset, emails are
     # logged to the console (dev fallback) instead of being sent.
     smtp_host: str = ""

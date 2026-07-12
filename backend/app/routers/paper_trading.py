@@ -19,9 +19,10 @@ from app.services.auth_service import require_auth, get_user_id
 def _apply_user_alpaca(user):
     """Point the Alpaca client at the logged-in user's own keys for this request."""
     from app.services import alpaca_service
+    from app.utils.crypto import decrypt_secret
     alpaca_service.use_credentials(
-        getattr(user, "alpaca_api_key", None),
-        getattr(user, "alpaca_api_secret", None),
+        decrypt_secret(getattr(user, "alpaca_api_key", None)),
+        decrypt_secret(getattr(user, "alpaca_api_secret", None)),
     )
 
 router = APIRouter(prefix="/paper-trading", tags=["paper-trading"])

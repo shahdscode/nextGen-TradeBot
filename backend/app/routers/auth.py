@@ -158,16 +158,18 @@ class AlpacaConfigRequest(BaseModel):
 @router.get("/alpaca-config")
 def get_alpaca_config(user=Depends(require_auth)):
     """Whether the current user has Alpaca keys set (never returns the secret)."""
-    configured = bool(user.alpaca_api_key and user.alpaca_api_secret)
-    masked = (user.alpaca_api_key[:4] + "…" + user.alpaca_api_key[-4:]) \
-        if configured and len(user.alpaca_api_key or "") >= 8 else None
+    from app.utils.crypto import decrypt_secret
+    key = decrypt_secret(user.alpaca_api_key)
+    configured = bool(key and user.alpaca_api_secret)
+    masked = (key[:4] + "…" + key[-4:]) if configured and len(key or "") >= 8 else None
     return {"configured": configured, "key_preview": masked}
 
 
 @router.put("/alpaca-config")
 def set_alpaca_config(req: AlpacaConfigRequest, user=Depends(require_auth)):
-    """Save the current user's own Alpaca paper-trading keys."""
+    """Save the current user's own Alpaca paper-trading keys (encrypted at rest)."""
     from app.database import SessionLocal, User
+    from app.utils.crypto import encrypt_secret
     if not req.api_key.strip() or not req.api_secret.strip():
         raise HTTPException(status_code=400, detail="Both API key and secret are required")
     db = SessionLocal()
@@ -175,8 +177,8 @@ def set_alpaca_config(req: AlpacaConfigRequest, user=Depends(require_auth)):
         u = db.query(User).filter(User.id == user.id).first()
         if not u:
             raise HTTPException(status_code=404, detail="User not found")
-        u.alpaca_api_key = req.api_key.strip()
-        u.alpaca_api_secret = req.api_secret.strip()
+        u.alpaca_api_key = encrypt_secret(req.api_key.strip())
+        u.alpaca_api_secret = encrypt_secret(req.api_secret.strip())
         db.commit()
         return {"ok": True, "message": "Alpaca keys saved", "configured": True}
     finally:
