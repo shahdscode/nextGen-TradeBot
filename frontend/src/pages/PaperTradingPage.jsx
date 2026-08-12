@@ -5,6 +5,22 @@ import client from '../api/client'
 import { CardSkeleton } from '../components/Skeleton'
 import { CHART_TOOLTIP_STYLE } from '../chartTheme'
 import { InsightsDashboard, RichTradeJournal } from '../components/paperTradingInsights'
+
+const SIZING_LABELS = {
+  risk: 'Risk-based (ATR)', risk_parity: 'Risk parity', min_variance: 'Min variance',
+  max_sharpe: 'Max Sharpe', inverse_vol: 'Inverse volatility', conviction: 'Conviction-weighted',
+}
+const sizingLabel = (m) => SIZING_LABELS[m] || m
+
+// Small hover-tooltip dot for inline explanations.
+function Info({ text }) {
+  return (
+    <span title={text}
+      className="inline-flex items-center justify-center w-3.5 h-3.5 ml-1 rounded-full bg-gray-200 text-gray-500 text-[9px] font-bold cursor-help align-middle">
+      i
+    </span>
+  )
+}
 import PortfolioIntelligence from '../components/PortfolioIntelligence'
 import { computeAIConfidence } from '../utils/signalVotes'
 
@@ -211,7 +227,23 @@ export default function PaperTradingPage() {
         </div>
       )}
 
-      <p className="text-sm text-gray-500 mb-6">US (DOW 30) via Alpaca real fills · Egyptian market (EGX) via simulated session</p>
+      {/* Two paper-trading modes — made explicit */}
+      <div className="mb-6 max-w-3xl grid sm:grid-cols-2 gap-3">
+        <div className="rounded-xl border border-indigo-200 bg-indigo-50/50 p-3">
+          <div className="text-xs font-semibold text-indigo-900">🧪 Internal Simulator</div>
+          <div className="text-[11px] text-indigo-700/80 mt-0.5">
+            Your own simulated portfolio (US &amp; EGX). Nothing leaves the app — the AI allocates and
+            we track a virtual account.
+          </div>
+        </div>
+        <div className="rounded-xl border border-emerald-200 bg-emerald-50/50 p-3">
+          <div className="text-xs font-semibold text-emerald-900">🏦 Alpaca Paper Account</div>
+          <div className="text-[11px] text-emerald-700/80 mt-0.5">
+            Orders sent to your connected Alpaca <strong>paper</strong> account (US equities). Simulated
+            money, broker-processed fills — no real funds.
+          </div>
+        </div>
+      </div>
 
       {/* Simulated session — market + ticker picker (US & EGX) */}
       <div className="bg-white border border-indigo-200 rounded-xl p-6 mb-6 max-w-3xl">
@@ -297,15 +329,15 @@ export default function PaperTradingPage() {
                   Advisory · {suggestions.regime} regime — review and click Rebalance to apply
                 </div>
                 <div className="flex flex-wrap gap-2 mb-2 text-[10px] text-violet-700">
-                  {suggestions.sizing_method && <span className="px-1.5 py-0.5 rounded bg-violet-100 border border-violet-200">method: {suggestions.sizing_method}</span>}
-                  {suggestions.vol_regime?.vol_regime && <span className="px-1.5 py-0.5 rounded bg-violet-100 border border-violet-200">vol: {suggestions.vol_regime.vol_regime} (×{suggestions.vol_regime.risk_scale})</span>}
-                  {suggestions.gross_exposure != null && <span className="px-1.5 py-0.5 rounded bg-violet-100 border border-violet-200">invested: {(suggestions.gross_exposure*100).toFixed(0)}%</span>}
-                  {suggestions.avg_correlation != null && <span className="px-1.5 py-0.5 rounded bg-violet-100 border border-violet-200">avg corr: {suggestions.avg_correlation}</span>}
+                  {suggestions.sizing_method && <span className="px-1.5 py-0.5 rounded bg-violet-100 border border-violet-200">Allocation: {sizingLabel(suggestions.sizing_method)}</span>}
+                  {suggestions.vol_regime?.vol_regime && <span className="px-1.5 py-0.5 rounded bg-violet-100 border border-violet-200" title="Position sizes are scaled by market volatility.">Volatility: {suggestions.vol_regime.vol_regime} · risk ×{suggestions.vol_regime.risk_scale}</span>}
+                  {suggestions.gross_exposure != null && <span className="px-1.5 py-0.5 rounded bg-violet-100 border border-violet-200" title="Share of the account the target allocation would invest (rest stays cash).">Target invested: {(suggestions.gross_exposure*100).toFixed(0)}%</span>}
+                  {suggestions.avg_correlation != null && <span className="px-1.5 py-0.5 rounded bg-violet-100 border border-violet-200" title="Average correlation between held names — lower is more diversified.">Avg correlation: {suggestions.avg_correlation}</span>}
                 </div>
                 <div className="flex flex-wrap gap-1.5">
                   {suggestions.recommendations.map((r) => (
                     <span key={r.ticker}
-                      title={r.stop_price ? `entry $${r.entry} · stop $${r.stop_price} · target $${r.take_profit}` : undefined}
+                      title={r.stop_price ? `${r.ticker}: entry $${r.entry} · 🛡 stop-loss $${r.stop_price} · 🎯 take-profit $${r.take_profit}` : undefined}
                       className={`px-2 py-0.5 rounded border text-[11px] ${
                       r.action === 'BUY' ? 'bg-emerald-100 text-emerald-700 border-emerald-200'
                       : r.action === 'SELL' ? 'bg-red-100 text-red-700 border-red-200'
@@ -314,6 +346,7 @@ export default function PaperTradingPage() {
                     </span>
                   ))}
                 </div>
+                <div className="text-[10px] text-violet-500 mt-1.5">🛡 = protective stop-loss + take-profit set · ⛔ = held name hit its stop</div>
               </>
             ) : `✗ ${suggestions.note}`}
           </div>
@@ -361,7 +394,10 @@ export default function PaperTradingPage() {
       {/* Alpaca paper broker — real US-equity fills */}
       <div className="bg-white border border-emerald-200 rounded-xl p-6 mb-6 max-w-3xl">
         <div className="flex items-center gap-2 mb-1">
-          <h2 className="text-sm font-semibold text-gray-900">Alpaca Paper Broker — real fills</h2>
+          <h2 className="text-sm font-semibold text-gray-900">
+            Alpaca Paper Broker — paper fills
+            <Info text="Simulated money. Orders are processed by Alpaca's paper environment like a real broker, but no real funds are used." />
+          </h2>
           <span className={`text-[10px] px-2 py-0.5 rounded-full font-medium ${
             alpaca?.configured ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>
             {alpaca?.configured ? (alpaca?.market_open ? 'market open' : 'market closed') : 'not configured'}
@@ -374,8 +410,9 @@ export default function PaperTradingPage() {
           )}
         </div>
         <p className="text-xs text-gray-500 mb-4">
-          Submits real orders to your free Alpaca paper account (US equities = DOW30).
-          The model picks the allocation; Alpaca executes and tracks positions + P&L.
+          Submits orders to your free Alpaca <strong>paper</strong> account (US equities = DOW30) —
+          simulated money, no real funds. The model picks the allocation; Alpaca processes the fills
+          and tracks positions + P&L.
         </p>
         {alpaca?.configured && (
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4">
@@ -405,7 +442,10 @@ export default function PaperTradingPage() {
               </div>
             </div>
             <div className="bg-gray-50 rounded-lg p-3">
-              <div className="text-xs text-gray-500">Buying Power</div>
+              <div className="text-xs text-gray-500">
+                Buying Power
+                <Info text="Purchasing capacity reported by Alpaca. It can exceed equity because paper margin accounts allow ~2× buying power — it is not extra cash." />
+              </div>
               <div className="text-lg font-bold text-gray-900">
                 ${Number(alpaca.buying_power).toLocaleString(undefined, { maximumFractionDigits: 0 })}
               </div>
@@ -456,6 +496,25 @@ export default function PaperTradingPage() {
               : `✗ ${alpacaResult.note}`}
           </div>
         )}
+        {/* Execution-pending banner: reconcile target vs current when fills are queued */}
+        {alpacaResult?.ok && alpacaResult.n_orders > 0 && alpaca?.market_open === false && (() => {
+          const targetInv = alpacaResult.weights
+            ? Object.values(alpacaResult.weights).reduce((a, b) => a + b, 0) : null
+          const curInv = alpaca?.equity > 0 ? 1 - (alpaca.cash / alpaca.equity) : null
+          return (
+            <div className="text-xs rounded-lg p-3 mb-3 bg-amber-50 border border-amber-200 text-amber-900">
+              <div className="font-medium mb-0.5">⏳ Execution pending — market closed</div>
+              <div className="text-amber-800/90">
+                {alpacaResult.n_orders} order{alpacaResult.n_orders !== 1 ? 's' : ''} queued; they fill at the next market open.
+                {targetInv != null && curInv != null && (
+                  <> Target invested <strong>{(targetInv * 100).toFixed(0)}%</strong> ·
+                  currently <strong>{(curInv * 100).toFixed(0)}%</strong>. The holdings below reflect
+                  the <em>current</em> account, not the target yet.</>
+                )}
+              </div>
+            </div>
+          )
+        })()}
         {alpacaPf?.equity_curve?.length > 2 && (
           <div className="mb-4">
             <div className="text-xs text-gray-500 mb-1">Equity curve (since inception)</div>

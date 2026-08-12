@@ -37,7 +37,10 @@ export function ActiveStrategyCard({ metaStatus, weights }) {
           </div>
         </div>
         <div className="flex items-center justify-between text-xs border-t border-white/5 pt-2">
-          <span className="text-gray-500">Fusion</span>
+          <span className="text-gray-500 cursor-help"
+            title="How the 7 base models are combined. EWMA Adaptive dynamically weights each model by its recent accuracy — models that have been right lately count more.">
+            Fusion ⓘ
+          </span>
           <span className="text-teal-300">{fusionLabel}</span>
         </div>
         <div className="flex items-center justify-between text-xs">
@@ -75,10 +78,13 @@ export function AIMarketSummaryCard({ signals, regime }) {
 
   return (
     <div className="bg-gray-900/60 border border-white/10 rounded-xl p-5">
-      <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Today&apos;s AI Summary</h3>
+      <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Current Market State</h3>
       <ul className="space-y-1.5 text-sm text-gray-300">
         <li className="flex justify-between gap-2">
-          <span className="text-gray-500">Market regime</span>
+          <span className="text-gray-500 cursor-help"
+            title="The market regime is detected from price action and exists whether or not the AI has generated trading signals — they are separate things.">
+            Market regime ⓘ
+          </span>
           <span className="font-medium text-white">{summary.regime}</span>
         </li>
         <li className="flex justify-between gap-2">

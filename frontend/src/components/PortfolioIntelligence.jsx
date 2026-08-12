@@ -63,34 +63,54 @@ function Metric({ label, value, sub }) {
   )
 }
 
+const concentrationLevel = (pct) =>
+  pct == null ? null : pct >= 50 ? 'High' : pct >= 30 ? 'Moderate' : 'Low'
+
+const diversificationText = (n) =>
+  n == null ? '' : n < 3 ? 'highly concentrated' : n < 6 ? 'moderately concentrated' : 'well diversified'
+
 export default function PortfolioIntelligence({ analytics, source, onSourceChange }) {
   const data = analytics?.[source]
   const hasData = data?.has_positions || (data?.holdings_count > 0) || (data?.cash_pct < 100 && data?.portfolio_value > 0)
+  const conc = concentrationLevel(data?.largest_position?.pct)
 
   return (
     <div className="bg-gray-900/60 border border-white/10 rounded-xl p-6 mb-8">
       <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
         <div>
           <h2 className="text-sm font-semibold text-white">Portfolio Intelligence</h2>
-          <p className="text-xs text-gray-500 mt-0.5">Allocation, diversification, and risk context</p>
+          <p className="text-xs text-gray-500 mt-0.5">
+            Viewing the <span className="text-teal-300 font-medium">
+              {source === 'sim' ? 'Internal Simulator' : 'Alpaca paper'}</span> portfolio ·
+            allocation, diversification &amp; risk
+          </p>
         </div>
-        <div className="flex rounded-lg border border-white/10 overflow-hidden text-xs">
-          {['sim', 'alpaca'].map((key) => (
-            <button
-              key={key}
-              type="button"
-              onClick={() => onSourceChange(key)}
-              className={`px-3 py-1.5 capitalize transition-colors ${
-                source === key
-                  ? 'bg-teal-600/30 text-teal-200'
-                  : 'bg-gray-950/40 text-gray-500 hover:text-gray-300'
-              }`}
-            >
-              {key === 'sim' ? 'Simulator' : 'Alpaca'}
-            </button>
-          ))}
+        <div className="flex flex-col items-end gap-1">
+          <span className="text-[10px] text-gray-500 uppercase tracking-wide">Portfolio</span>
+          <div className="flex rounded-lg border border-white/10 overflow-hidden text-xs">
+            {['sim', 'alpaca'].map((key) => (
+              <button
+                key={key}
+                type="button"
+                onClick={() => onSourceChange(key)}
+                className={`px-3 py-1.5 transition-colors ${
+                  source === key
+                    ? 'bg-teal-600/30 text-teal-200'
+                    : 'bg-gray-950/40 text-gray-500 hover:text-gray-300'
+                }`}
+              >
+                {key === 'sim' ? 'Simulator' : 'Alpaca'}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
+
+      {conc === 'High' && data.largest_position && (
+        <div className="mb-4 text-xs rounded-lg px-3 py-2 bg-amber-500/10 border border-amber-500/30 text-amber-300">
+          ⚠️ High concentration — {data.largest_position.symbol} is {data.largest_position.pct}% of the portfolio.
+        </div>
+      )}
 
       {!data ? (
         <p className="text-sm text-gray-500">Loading portfolio analytics…</p>
@@ -108,7 +128,7 @@ export default function PortfolioIntelligence({ analytics, source, onSourceChang
             <Metric
               label="Largest Position"
               value={data.largest_position ? `${data.largest_position.symbol}` : '—'}
-              sub={data.largest_position ? `${data.largest_position.pct}%` : undefined}
+              sub={data.largest_position ? `${data.largest_position.pct}% · ${conc} conc.` : undefined}
             />
             <Metric
               label="Top Sector"
@@ -119,7 +139,9 @@ export default function PortfolioIntelligence({ analytics, source, onSourceChang
             <Metric
               label="Diversification"
               value={data.diversification_score ?? '—'}
-              sub="effective # names"
+              sub={data.diversification_score != null
+                ? `effective names — ${diversificationText(data.diversification_score)}`
+                : 'effective # names'}
             />
             <Metric
               label="Avg Holding"
