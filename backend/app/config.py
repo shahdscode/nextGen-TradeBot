@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     alpaca_api_key: str = ""
     alpaca_api_secret: str = ""
     alpaca_base_url: str = "https://paper-api.alpaca.markets"
+    # EODHD — licensed market data for EGX (and optionally US). When unset, EGX
+    # falls back to yfinance. Get a key at https://eodhd.com (paid tier for full
+    # history depth). https://eodhd.com/exchange/EGX
+    eodhd_api_key: str = ""
     mt5_gateway_url: str = "http://51.21.209.128:8000"
     mt5_api_key: str = ""
     mt5_timeframe: str = "M15"
