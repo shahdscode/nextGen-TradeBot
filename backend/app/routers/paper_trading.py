@@ -166,14 +166,24 @@ def _mt5_headers() -> dict[str, str]:
     return headers
 
 
+# Circuit breaker: when the MT5 gateway is unreachable we skip it for a while so
+# every EGX position doesn't pay the full connect timeout (was ~8s each).
+_MT5_DOWN_UNTIL: float = 0.0
+_MT5_COOLDOWN = 300   # seconds to skip MT5 after a failure
+
+
 def _latest_price(symbol: str, timeframe: str) -> float | None:
+    global _MT5_DOWN_UNTIL
+    import time
+    if time.time() < _MT5_DOWN_UNTIL:
+        return None   # gateway known-down — skip and fall through to next source
     try:
         base_url = settings.mt5_gateway_url.rstrip("/")
         resp = requests.get(
             f"{base_url}/candles",
             params={"symbol": symbol, "timeframe": timeframe, "bars": 2},
             headers=_mt5_headers(),
-            timeout=8,
+            timeout=(3, 5),
         )
         resp.raise_for_status()
         payload = resp.json()
@@ -182,6 +192,7 @@ def _latest_price(symbol: str, timeframe: str) -> float | None:
         close_val = payload[-1].get("close")
         return float(close_val) if close_val is not None else None
     except Exception:
+        _MT5_DOWN_UNTIL = time.time() + _MT5_COOLDOWN   # trip the breaker
         return None
 
 
@@ -227,9 +238,32 @@ def _equity_price(symbol: str) -> float | None:
         return None
 
 
+def _alpaca_equity_price(symbol: str) -> float | None:
+    """Latest US-equity price via Alpaca (fast, licensed). None for EGX/failure."""
+    if symbol.upper().endswith(".CA"):   # EGX — Alpaca has no coverage
+        return None
+    import time
+    now = time.time()
+    hit = _EQUITY_PX_CACHE.get(symbol)
+    if hit and now - hit[1] < 30:
+        return hit[0]
+    try:
+        from app.services import alpaca_service
+        px = alpaca_service.get_latest_price(symbol)
+        if px:
+            _EQUITY_PX_CACHE[symbol] = (px, now)
+        return px
+    except Exception:
+        return None
+
+
 def _current_price(symbol: str, timeframe: str = "1d") -> float:
-    """JSON-safe current price: MT5 gateway → Yahoo (incl. .CA EGX) → fallback."""
-    return (_finite(_latest_price(symbol, timeframe), 0.0)
+    """
+    JSON-safe current price. US equities use Alpaca first (fast, licensed); then
+    MT5 gateway → Yahoo (incl. .CA EGX) → deterministic fallback.
+    """
+    return (_finite(_alpaca_equity_price(symbol), 0.0)
+            or _finite(_latest_price(symbol, timeframe), 0.0)
             or _finite(_equity_price(symbol), 0.0)
             or _fallback_price(symbol))
 
