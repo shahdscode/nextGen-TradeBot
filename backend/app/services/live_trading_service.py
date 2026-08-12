@@ -55,25 +55,54 @@ RL_ALGOS = {"ppo", "a2c", "ddpg", "td3", "sac"}
 _LOOKBACK_DAYS = 420   # calendar days; ~280 trading days (252 warmup + buffer)
 
 
+def _yahoo_reachable(timeout: float = 4.0) -> bool:
+    """
+    Fast health probe for Yahoo Finance — one lightweight HTTP request. Lets the
+    live-data path fail over to cached features in ~2s instead of grinding
+    through per-ticker retries (~35s) when Yahoo is unreachable OR rate-limiting
+    (HTTP 429), keeping paper-trading suggest/rebalance responsive.
+
+    A plain TCP connect is not enough: Yahoo accepts the connection but returns
+    429 at the HTTP layer when throttling yfinance, so we must check the response.
+    """
+    import urllib.request
+    url = "https://query1.finance.yahoo.com/v8/finance/chart/AAPL?range=1d&interval=1d"
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return getattr(r, "status", 200) == 200
+    except Exception:
+        return False
+
+
 def _download_live(tickers: List[str], start: str, end: str) -> pd.DataFrame:
     import yfinance as yf
+    if not _yahoo_reachable():
+        raise RuntimeError("Yahoo Finance unreachable (fast-fail) — using cached features")
     frames = []
+    consecutive_fail = 0
     for tic in tickers:
+        got = False
         try:
             raw = yf.download(tic, start=start, end=end, progress=False, auto_adjust=True)
-            if raw.empty:
-                continue
-            if isinstance(raw.columns, pd.MultiIndex):
-                raw.columns = raw.columns.get_level_values(0)
-            raw = raw.rename(columns=str.lower).reset_index()
-            raw = raw.rename(columns={"index": "date", "Date": "date", "Datetime": "date"})
-            raw["tic"] = tic
-            for c in ("open", "high", "low", "close", "volume"):
-                if c not in raw.columns:
-                    raw[c] = 0.0
-            frames.append(raw[["date", "tic", "open", "high", "low", "close", "volume"]])
+            if not raw.empty:
+                if isinstance(raw.columns, pd.MultiIndex):
+                    raw.columns = raw.columns.get_level_values(0)
+                raw = raw.rename(columns=str.lower).reset_index()
+                raw = raw.rename(columns={"index": "date", "Date": "date", "Datetime": "date"})
+                raw["tic"] = tic
+                for c in ("open", "high", "low", "close", "volume"):
+                    if c not in raw.columns:
+                        raw[c] = 0.0
+                frames.append(raw[["date", "tic", "open", "high", "low", "close", "volume"]])
+                got = True
         except Exception as exc:
             logger.warning("live download failed for %s: %s", tic, exc)
+        consecutive_fail = 0 if got else consecutive_fail + 1
+        # Bail early if the feed is clearly down/throttled instead of grinding
+        # through every ticker (Yahoo 429s the whole batch).
+        if consecutive_fail >= 4 and not frames:
+            raise RuntimeError("Yahoo returned no data for first tickers — using cached features")
     if not frames:
         raise RuntimeError("No live data downloaded for any ticker")
     df = pd.concat(frames, ignore_index=True)
@@ -83,6 +112,24 @@ def _download_live(tickers: List[str], start: str, end: str) -> pd.DataFrame:
         lambda s: s.replace(0, np.nan).ffill().bfill()
     )
     return df
+
+
+def _download_prices(tickers: List[str], start: str, end: str, market: str) -> pd.DataFrame:
+    """
+    Source OHLCV for the market. US uses Alpaca's licensed market-data feed
+    (the same broker the account trades on — avoids Yahoo's yfinance rate limits);
+    yfinance is only a fallback. EGX has no Alpaca coverage, so it uses yfinance.
+    """
+    if market == "us":
+        try:
+            from app.services import alpaca_service
+            if alpaca_service.configured():
+                df = alpaca_service.get_daily_bars(tickers, start, end)
+                logger.info("US prices via Alpaca market data (%d tickers)", df["tic"].nunique())
+                return df
+        except Exception as exc:
+            logger.warning("Alpaca bars failed (%s) — falling back to yfinance", exc)
+    return _download_live(tickers, start, end)
 
 
 def _build_featured(df: pd.DataFrame, vix_df: pd.DataFrame) -> pd.DataFrame:
@@ -140,8 +187,15 @@ def _latest_featured(market: str = "us") -> tuple:
     start = end - timedelta(days=_LOOKBACK_DAYS)
     tickers = EGX_LIVE_TICKERS if market == "egx" else LIVE_TICKERS
     try:
-        raw = _download_live(tickers, str(start), str(end))
-        vix = download_vix(str(start), str(end)) if market != "egx" else None
+        raw = _download_prices(tickers, str(start), str(end), market)
+        # VIX (US only) is best-effort — Alpaca has no index data, so it comes
+        # from yfinance and may rate-limit. Degrade to no-VIX rather than fail.
+        vix = None
+        if market != "egx":
+            try:
+                vix = download_vix(str(start), str(end))
+            except Exception as exc:
+                logger.warning("VIX download failed (%s) — proceeding without VIX", exc)
         featured = _build_featured(raw, vix)
         latest_date = pd.to_datetime(featured["date"]).max()
         return featured, latest_date
@@ -185,7 +239,54 @@ def _rl_holdings(featured: pd.DataFrame, algo: str, model_path: str,
     return {t: float(holdings[i]) for i, t in enumerate(tics)}
 
 
+# Result cache: the full ensemble (features + XGBoost + LSTM + 5 RL rollouts +
+# meta-learner) is heavy (~10-30s) and its inputs only change daily, so we cache
+# the allocation per (market, universe, sizing params) for a short TTL. Repeated
+# suggest/rebalance/command-center calls then return instantly.
+_ALLOC_CACHE: "Dict[tuple, tuple]" = {}
+_ALLOC_TTL_SECONDS = 900   # 15 minutes
+
+
+def _alloc_cache_key(market, tickers, top_k, sizing_method, initial_cash, risk_config):
+    return (
+        (market or "us").lower(),
+        tuple(sorted(t.upper() for t in tickers)) if tickers else "ALL",
+        top_k, (sizing_method or "risk"),
+        round(float(initial_cash) / 1000.0) * 1000,   # bucket cash so small drift still hits
+        tuple(sorted((risk_config or {}).items())),
+    )
+
+
 def generate_meta_allocation(initial_cash: float = 100_000.0,
+                             market: str = "us",
+                             tickers: Optional[List[str]] = None,
+                             top_k: int = 10,
+                             risk_config: Optional[dict] = None,
+                             sizing_method: str = "risk",
+                             use_cache: bool = True) -> Dict[str, Any]:
+    """
+    Cached wrapper around the meta-learner allocation. Serves a recent result
+    (within _ALLOC_TTL_SECONDS) instead of recomputing the full ensemble.
+    Pass use_cache=False to force a fresh computation.
+    """
+    import time as _t
+    key = _alloc_cache_key(market, tickers, top_k, sizing_method, initial_cash, risk_config)
+    now = _t.time()
+    if use_cache:
+        hit = _ALLOC_CACHE.get(key)
+        if hit and (now - hit[0]) < _ALLOC_TTL_SECONDS and hit[1].get("ok"):
+            cached = dict(hit[1])
+            cached["cached"] = True
+            cached["cached_age_seconds"] = int(now - hit[0])
+            return cached
+    result = _generate_meta_allocation_uncached(
+        initial_cash, market, tickers, top_k, risk_config, sizing_method)
+    if result.get("ok"):
+        _ALLOC_CACHE[key] = (now, result)
+    return result
+
+
+def _generate_meta_allocation_uncached(initial_cash: float = 100_000.0,
                              market: str = "us",
                              tickers: Optional[List[str]] = None,
                              top_k: int = 10,
