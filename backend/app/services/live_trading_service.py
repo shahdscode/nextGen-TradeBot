@@ -129,6 +129,15 @@ def _download_prices(tickers: List[str], start: str, end: str, market: str) -> p
                 return df
         except Exception as exc:
             logger.warning("Alpaca bars failed (%s) — falling back to yfinance", exc)
+    elif market == "egx":
+        try:
+            from app.services import eodhd_service
+            if eodhd_service.configured():
+                df = eodhd_service.get_daily_bars(tickers, start, end)
+                logger.info("EGX prices via EODHD (%d tickers)", df["tic"].nunique())
+                return df
+        except Exception as exc:
+            logger.warning("EODHD bars failed (%s) — falling back to yfinance", exc)
     return _download_live(tickers, start, end)
 
 

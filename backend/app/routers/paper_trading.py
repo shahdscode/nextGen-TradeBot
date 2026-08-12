@@ -257,12 +257,32 @@ def _alpaca_equity_price(symbol: str) -> float | None:
         return None
 
 
+def _eodhd_egx_price(symbol: str) -> float | None:
+    """Latest EGX price via EODHD (licensed). None for non-EGX/failure."""
+    if not symbol.upper().endswith(".CA"):
+        return None
+    import time
+    now = time.time()
+    hit = _EQUITY_PX_CACHE.get(symbol)
+    if hit and now - hit[1] < 30:
+        return hit[0]
+    try:
+        from app.services import eodhd_service
+        px = eodhd_service.get_latest_price(symbol)
+        if px:
+            _EQUITY_PX_CACHE[symbol] = (px, now)
+        return px
+    except Exception:
+        return None
+
+
 def _current_price(symbol: str, timeframe: str = "1d") -> float:
     """
-    JSON-safe current price. US equities use Alpaca first (fast, licensed); then
-    MT5 gateway → Yahoo (incl. .CA EGX) → deterministic fallback.
+    JSON-safe current price. Licensed sources first — Alpaca for US equities,
+    EODHD for EGX (.CA) — then MT5 gateway → Yahoo → deterministic fallback.
     """
     return (_finite(_alpaca_equity_price(symbol), 0.0)
+            or _finite(_eodhd_egx_price(symbol), 0.0)
             or _finite(_latest_price(symbol, timeframe), 0.0)
             or _finite(_equity_price(symbol), 0.0)
             or _fallback_price(symbol))
