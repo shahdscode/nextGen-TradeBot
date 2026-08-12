@@ -64,9 +64,45 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 MODELS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _download_licensed(tickers: list, start: str, end: str, market: str):
+    """
+    Try the licensed provider for this market — Alpaca for US, EODHD for EGX —
+    so training data comes from the same reliable source the live app uses.
+    Returns a long DataFrame or None to fall back to yfinance.
+    """
+    try:
+        if market == "us":
+            from app.services import alpaca_service
+            if alpaca_service.configured():
+                df = alpaca_service.get_daily_bars(tickers, start, end)
+                logger.info("US training data via Alpaca (%d tickers)", df["tic"].nunique())
+                return df
+        elif market == "egx":
+            from app.services import eodhd_service
+            if eodhd_service.configured():
+                df = eodhd_service.get_daily_bars(tickers, start, end)
+                logger.info("EGX training data via EODHD (%d tickers)", df["tic"].nunique())
+                return df
+    except Exception as exc:
+        logger.warning("Licensed provider for %s failed (%s) — using yfinance", market, exc)
+    return None
+
+
 def download_ohlcv(tickers: list, start: str, end: str, market: str) -> pd.DataFrame:
-    """Download OHLCV for a list of tickers, return long-format DataFrame."""
+    """Download OHLCV for a list of tickers, return long-format DataFrame.
+
+    Prefers the licensed provider (Alpaca/EODHD); yfinance is the fallback.
+    """
     logger.info("Downloading %d %s tickers (%s → %s)…", len(tickers), market, start, end)
+
+    licensed = _download_licensed(tickers, start, end, market)
+    if licensed is not None and not licensed.empty:
+        df = licensed.copy()
+        df["date"] = pd.to_datetime(df["date"]).dt.normalize()
+        df = df.sort_values(["tic", "date"])
+        df["close"] = df.groupby("tic")["close"].transform(lambda s: s.replace(0, np.nan).ffill().bfill())
+        return df
+
     frames = []
     for tic in tickers:
         try:
