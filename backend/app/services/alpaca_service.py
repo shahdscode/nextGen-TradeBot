@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 import contextvars
 
 _BASE = (settings.alpaca_base_url or "https://paper-api.alpaca.markets").rstrip("/")
+# Market-data API lives on a different host than the trading API.
+_DATA_BASE = "https://data.alpaca.markets"
 
 # Per-request credentials override. The router sets this from the logged-in
 # user's saved keys so each user trades their OWN Alpaca paper account. When
@@ -45,6 +47,50 @@ def _active_creds():
 def configured() -> bool:
     k, s = _active_creds()
     return bool(k and s)
+
+
+def get_daily_bars(symbols: List[str], start: str, end: str, feed: str = "iex"):
+    """
+    Daily OHLCV bars from Alpaca's market-data API (licensed IEX feed on the free
+    tier). Split+dividend adjusted (adjustment=all) to match Yahoo's auto_adjust.
+
+    Returns a long DataFrame [date, tic, open, high, low, close, volume].
+    Raises if Alpaca isn't configured or returns nothing (caller falls back to
+    yfinance). start/end are 'YYYY-MM-DD'.
+    """
+    import pandas as pd
+    k, s = _active_creds()
+    if not (k and s):
+        raise RuntimeError("Alpaca not configured — cannot fetch bars")
+
+    rows: List[dict] = []
+    page_token = None
+    while True:
+        params = {
+            "symbols": ",".join(symbols),
+            "timeframe": "1Day",
+            "start": start, "end": end,
+            "adjustment": "all", "feed": feed, "limit": 10000,
+        }
+        if page_token:
+            params["page_token"] = page_token
+        r = requests.get(f"{_DATA_BASE}/v2/stocks/bars", headers=_headers(),
+                         params=params, timeout=_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+        for tic, bars in (data.get("bars") or {}).items():
+            for b in bars:
+                rows.append({"date": b["t"][:10], "tic": tic,
+                             "open": b["o"], "high": b["h"], "low": b["l"],
+                             "close": b["c"], "volume": b["v"]})
+        page_token = data.get("next_page_token")
+        if not page_token:
+            break
+    if not rows:
+        raise RuntimeError("Alpaca returned no bars")
+    df = pd.DataFrame(rows)
+    df["date"] = pd.to_datetime(df["date"])
+    return df.sort_values(["tic", "date"]).reset_index(drop=True)
 
 
 def _headers() -> Dict[str, str]:
@@ -323,6 +369,22 @@ def rebalance_with_brackets(targets: Dict[str, dict],
                  if not is_open else "Bracket orders submitted to live paper market."),
         "account": get_account(),
     }
+
+
+def get_latest_price(symbol: str, feed: str = "iex") -> Optional[float]:
+    """Latest trade price for a US symbol via Alpaca market data. None on failure."""
+    k, s = _active_creds()
+    if not (k and s):
+        return None
+    try:
+        r = requests.get(f"{_DATA_BASE}/v2/stocks/{symbol}/trades/latest",
+                         headers=_headers(), params={"feed": feed}, timeout=(4, 8))
+        if r.status_code >= 400:
+            return None
+        px = (r.json().get("trade") or {}).get("p")
+        return float(px) if px is not None else None
+    except Exception:
+        return None
 
 
 def rebalance_to_weights(target_weights: Dict[str, float],
