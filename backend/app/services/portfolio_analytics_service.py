@@ -59,10 +59,20 @@ def _symbol_allocation(weights: List[Dict], top_n: int = 8) -> List[Dict]:
 
 
 def _diversification_score(weights: List[Dict]) -> float:
+    """
+    Effective number of INVESTED securities = 1 / Σ wᵢ² (inverse HHI), where the
+    weights are normalized to sum to 1 across invested holdings (cash excluded).
+
+    Normalization is essential: raw weights are fractions of the whole portfolio
+    (incl. cash), so without it a 50%-cash portfolio of 10 names would report ~40
+    effective names. Result is bounded 1 ≤ N ≤ number of invested holdings.
+    """
     invested = [w["weight"] for w in weights if w["symbol"] != "CASH"]
-    if not invested:
+    total = sum(invested)
+    if total <= 0:
         return 0.0
-    hhi = sum(w * w for w in invested)
+    norm = [w / total for w in invested]   # weights of invested names sum to 1
+    hhi = sum(w * w for w in norm)
     if hhi <= 0:
         return 0.0
     return round(1.0 / hhi, 2)
