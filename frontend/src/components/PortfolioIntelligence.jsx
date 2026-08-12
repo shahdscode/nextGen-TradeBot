@@ -66,8 +66,15 @@ function Metric({ label, value, sub }) {
 const concentrationLevel = (pct) =>
   pct == null ? null : pct >= 50 ? 'High' : pct >= 30 ? 'Moderate' : 'Low'
 
-const diversificationText = (n) =>
-  n == null ? '' : n < 3 ? 'highly concentrated' : n < 6 ? 'moderately concentrated' : 'well diversified'
+// Interpretation of the effective-holdings (inverse-HHI) score. Bounded by the
+// number of invested holdings, so the buckets read relative to a small universe.
+const diversificationText = (n) => {
+  if (n == null) return ''
+  if (n < 2) return 'highly concentrated'
+  if (n < 4) return 'concentrated'
+  if (n < 7) return 'moderately diversified'
+  return 'well diversified'
+}
 
 export default function PortfolioIntelligence({ analytics, source, onSourceChange }) {
   const data = analytics?.[source]
