@@ -12,6 +12,19 @@ const SIZING_LABELS = {
 }
 const sizingLabel = (m) => SIZING_LABELS[m] || m
 
+// Numbered zone divider to give the page a clear top-level hierarchy.
+function ZoneHeader({ n, title, subtitle }) {
+  return (
+    <div className="flex items-baseline gap-3 mt-8 mb-3">
+      <span className="flex items-center justify-center w-6 h-6 rounded-full bg-teal-600/20 text-teal-300 text-xs font-bold shrink-0">{n}</span>
+      <div>
+        <h2 className="text-base font-semibold text-white leading-none">{title}</h2>
+        {subtitle && <p className="text-xs text-gray-500 mt-1">{subtitle}</p>}
+      </div>
+    </div>
+  )
+}
+
 // Order-status badge (filled / pending / failed buckets).
 const _FILLED = ['filled']
 const _FAILED = ['canceled', 'cancelled', 'expired', 'rejected', 'done_for_day']
@@ -214,6 +227,9 @@ export default function PaperTradingPage() {
         </div>
       </div>
 
+      <ZoneHeader n="1" title="Current Status"
+        subtitle="What the AI sees, how it's configured, and what your portfolio looks like right now." />
+
       <InsightsDashboard
         signals={signals}
         regime={regime}
@@ -237,6 +253,9 @@ export default function PaperTradingPage() {
           to rebalance a real Alpaca paper portfolio.
         </div>
       )}
+
+      <ZoneHeader n="2" title="Trade & Execute"
+        subtitle="Review what the AI wants (Suggest), then apply it (Rebalance) — in the simulator or your Alpaca paper account." />
 
       {/* Two paper-trading modes — made explicit */}
       <div className="mb-6 max-w-3xl grid sm:grid-cols-2 gap-3">
@@ -638,6 +657,44 @@ export default function PaperTradingPage() {
           </div>
         )}
       </div>
+
+      <ZoneHeader n="3" title="Execution Status"
+        subtitle="Whether the AI's target has actually been applied — orders filled, pending, or failed." />
+
+      <div className="grid sm:grid-cols-2 gap-3 mb-2 max-w-3xl">
+        <div className="rounded-xl border border-indigo-200 bg-white p-4">
+          <div className="text-xs font-semibold text-gray-700 mb-2">🧪 Internal Simulator</div>
+          {simPf?.positions?.length > 0 ? (
+            <div className="text-xs text-gray-600">
+              <span className="font-semibold text-gray-900">{simPf.positions.length}</span> positions ·
+              cash ${Number(simPf.cash ?? 0).toLocaleString(undefined, { maximumFractionDigits: 0 })} ·
+              instantly applied (no pending orders)
+            </div>
+          ) : (
+            <div className="text-xs text-gray-400">No simulated positions yet — run Rebalance above.</div>
+          )}
+        </div>
+        <div className="rounded-xl border border-emerald-200 bg-white p-4">
+          <div className="text-xs font-semibold text-gray-700 mb-2">🏦 Alpaca Paper Account</div>
+          {alpacaPf?.order_summary?.total > 0 ? (
+            <div className="flex flex-wrap gap-1.5 text-[11px]">
+              <span className="px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">{alpacaPf.order_summary.filled} filled</span>
+              <span className="px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">{alpacaPf.order_summary.pending} pending</span>
+              {alpacaPf.order_summary.failed > 0 && (
+                <span className="px-1.5 py-0.5 rounded bg-red-100 text-red-700">{alpacaPf.order_summary.failed} failed</span>
+              )}
+              <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-600">{alpaca?.market_open ? 'market open' : 'market closed — pending fill at open'}</span>
+            </div>
+          ) : (
+            <div className="text-xs text-gray-400">
+              {alpaca?.configured ? 'No recent orders.' : 'Alpaca not configured.'}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <ZoneHeader n="4" title="Why Each Trade Happened"
+        subtitle="The decision trace behind every executed trade — models, regime, sizing, stops." />
 
       <RichTradeJournal tradeLog={tradeLog} onRefresh={loadTradeLog} />
 
