@@ -70,3 +70,14 @@ def test_latest_price_handles_NA(monkeypatch):
     monkeypatch.setattr(eodhd_service.settings, "eodhd_api_key", "TESTKEY")
     with patch.object(eodhd_service.requests, "get", return_value=_FakeResp({"close": "NA"})):
         assert eodhd_service.get_latest_price("COMI.CA") is None
+
+
+def test_order_summary_buckets():
+    from app.services.alpaca_service import summarize_orders
+    orders = [
+        {"status": "filled"}, {"status": "filled"},
+        {"status": "new"}, {"status": "accepted"}, {"status": "partially_filled"},
+        {"status": "canceled"}, {"status": "rejected"},
+    ]
+    s = summarize_orders(orders)
+    assert s == {"total": 7, "filled": 2, "pending": 3, "failed": 2}

@@ -158,6 +158,46 @@ def market_is_open() -> bool:
         return False
 
 
+def get_orders(status: str = "all", limit: int = 50) -> List[Dict[str, Any]]:
+    """Recent orders (status: all|open|closed), newest first. [] on failure."""
+    try:
+        orders = _get("/orders", status=status, limit=limit, direction="desc")
+    except Exception:
+        return []
+    out = []
+    for o in orders or []:
+        out.append({
+            "symbol":       o.get("symbol"),
+            "side":         o.get("side"),
+            "qty":          float(o["qty"]) if o.get("qty") else None,
+            "notional":     float(o["notional"]) if o.get("notional") else None,
+            "filled_qty":   float(o.get("filled_qty") or 0),
+            "status":       o.get("status"),
+            "submitted_at": o.get("submitted_at"),
+            "filled_at":    o.get("filled_at"),
+        })
+    return out
+
+
+# Alpaca statuses grouped into user-facing buckets.
+_FILLED = {"filled"}
+_FAILED = {"canceled", "cancelled", "expired", "rejected", "done_for_day"}
+
+
+def summarize_orders(orders: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Bucket order statuses into filled / pending / failed counts."""
+    filled = pending = failed = 0
+    for o in orders:
+        st = (o.get("status") or "").lower()
+        if st in _FILLED:
+            filled += 1
+        elif st in _FAILED:
+            failed += 1
+        else:                       # new, accepted, partially_filled, pending_*
+            pending += 1
+    return {"total": len(orders), "filled": filled, "pending": pending, "failed": failed}
+
+
 def get_positions() -> List[Dict[str, Any]]:
     out = []
     for p in _get("/positions"):
@@ -252,6 +292,7 @@ def portfolio_snapshot() -> Dict[str, Any]:
              if acct["last_equity"] > 0 else 0.0)
     hist = get_portfolio_history()
     dd   = drawdown_status()
+    orders = get_orders(status="all", limit=50)
     return {
         "configured":      True,
         "broker":          "alpaca_paper",
@@ -267,7 +308,9 @@ def portfolio_snapshot() -> Dict[str, Any]:
         "drawdown_breached": dd["breached"],
         "market_open":     market_is_open(),
         "positions":       pos,
-        "message":         "Live Alpaca paper account (real fills, US equities).",
+        "orders":          orders[:20],
+        "order_summary":   summarize_orders(orders),
+        "message":         "Alpaca paper account (paper fills, US equities).",
     }
 
 
