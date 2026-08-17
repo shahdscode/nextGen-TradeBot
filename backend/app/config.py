@@ -72,8 +72,9 @@ class Settings(BaseSettings):
     log_level: str = "INFO"           # DEBUG | INFO | WARNING | ERROR
     allow_public_register: bool = True
     cors_origins: str = (
-        "http://localhost:5173,http://localhost:80,http://127.0.0.1:5173,"
-        "https://nextgen-tradebot-self.vercel.app"
+        "http://localhost:5173,http://127.0.0.1:5173,"
+        "http://localhost:5174,http://127.0.0.1:5174,"   # vite dev server (launch.json)
+        "http://localhost:80,https://nextgen-tradebot-self.vercel.app"
     )
     seed_admin: bool = False  # set SEED_ADMIN=true to create default admin in production
 
