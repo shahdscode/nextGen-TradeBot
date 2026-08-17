@@ -526,6 +526,44 @@ export default function PaperTradingPage() {
             </div>
           )
         })()}
+        {/* Current vs Target — what the AI wants vs what the account holds now */}
+        {alpacaResult?.ok && alpacaResult.weights && alpaca?.equity > 0 && (() => {
+          const target = alpacaResult.weights
+          const curW = {}
+          for (const p of (alpacaPf?.positions || [])) curW[p.symbol] = p.market_value / alpaca.equity
+          const syms = Array.from(new Set([...Object.keys(target), ...Object.keys(curW)]))
+            .sort((a, b) => (target[b] || curW[b] || 0) - (target[a] || curW[a] || 0))
+          if (!syms.length) return null
+          return (
+            <div className="mb-4">
+              <div className="text-xs font-semibold text-gray-700 mb-1">Current → Target allocation</div>
+              <div className="overflow-x-auto max-h-40 overflow-y-auto">
+                <table className="w-full text-xs">
+                  <thead><tr className="border-b border-gray-100 text-gray-400 sticky top-0 bg-white">
+                    <th className="text-left py-1">Symbol</th><th className="text-right">Current</th>
+                    <th className="text-right">Target</th><th className="text-right pr-1">Change</th>
+                  </tr></thead>
+                  <tbody>
+                    {syms.map((s) => {
+                      const c = (curW[s] || 0) * 100, t = (target[s] || 0) * 100, d = t - c
+                      return (
+                        <tr key={s} className="border-b border-gray-50">
+                          <td className="py-1 font-medium">{s}</td>
+                          <td className="text-right text-gray-500">{c.toFixed(1)}%</td>
+                          <td className="text-right">{t.toFixed(1)}%</td>
+                          <td className={`text-right pr-1 ${Math.abs(d) < 0.1 ? 'text-gray-400' : d > 0 ? 'text-emerald-600' : 'text-red-500'}`}>
+                            {Math.abs(d) < 0.1 ? '—' : `${d > 0 ? '▲ +' : '▼ '}${d.toFixed(1)}%`}
+                          </td>
+                        </tr>
+                      )
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className="text-[10px] text-gray-400 mt-1">▲ buy toward target · ▼ trim/sell · reconciles once orders fill.</div>
+            </div>
+          )
+        })()}
         {alpacaPf?.equity_curve?.length > 2 && (
           <div className="mb-4">
             <div className="text-xs text-gray-500 mb-1">Equity curve (since inception)</div>
