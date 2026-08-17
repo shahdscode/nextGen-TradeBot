@@ -12,6 +12,17 @@ const SIZING_LABELS = {
 }
 const sizingLabel = (m) => SIZING_LABELS[m] || m
 
+// Order-status badge (filled / pending / failed buckets).
+const _FILLED = ['filled']
+const _FAILED = ['canceled', 'cancelled', 'expired', 'rejected', 'done_for_day']
+function OrderStatus({ status }) {
+  const s = (status || '').toLowerCase()
+  const bucket = _FILLED.includes(s) ? 'filled' : _FAILED.includes(s) ? 'failed' : 'pending'
+  const cls = bucket === 'filled' ? 'bg-emerald-100 text-emerald-700'
+    : bucket === 'failed' ? 'bg-red-100 text-red-700' : 'bg-amber-100 text-amber-700'
+  return <span className={`px-1.5 py-0.5 rounded text-[10px] ${cls}`} title={`Alpaca status: ${status}`}>{status}</span>
+}
+
 // Small hover-tooltip dot for inline explanations.
 function Info({ text }) {
   return (
@@ -531,8 +542,42 @@ export default function PaperTradingPage() {
             </ResponsiveContainer>
           </div>
         )}
+        {/* Execution zone — order status + recent orders (answers "did it execute?") */}
+        {alpacaPf?.order_summary?.total > 0 && (
+          <div className="mb-4">
+            <div className="flex items-center gap-2 mb-2">
+              <span className="text-xs font-semibold text-gray-700">Execution</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-100 text-emerald-700">{alpacaPf.order_summary.filled} filled</span>
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-100 text-amber-700">{alpacaPf.order_summary.pending} pending</span>
+              {alpacaPf.order_summary.failed > 0 && (
+                <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-100 text-red-700">{alpacaPf.order_summary.failed} failed</span>
+              )}
+              <span className="text-[10px] text-gray-400 ml-auto">last 50 orders</span>
+            </div>
+            <div className="overflow-x-auto max-h-40 overflow-y-auto">
+              <table className="w-full text-xs">
+                <thead><tr className="border-b border-gray-100 text-gray-400 sticky top-0 bg-white">
+                  <th className="text-left py-1">Symbol</th><th className="text-left">Side</th>
+                  <th className="text-right">Qty</th><th className="text-left pl-3">Status</th><th className="text-right">Submitted</th>
+                </tr></thead>
+                <tbody>
+                  {alpacaPf.orders.map((o, i) => (
+                    <tr key={i} className="border-b border-gray-50">
+                      <td className="py-1 font-medium">{o.symbol}</td>
+                      <td className={o.side === 'buy' ? 'text-emerald-600' : 'text-red-500'}>{o.side}</td>
+                      <td className="text-right">{o.qty ?? (o.notional ? `$${o.notional.toFixed(0)}` : '—')}</td>
+                      <td className="pl-3"><OrderStatus status={o.status} /></td>
+                      <td className="text-right text-gray-400">{o.submitted_at ? new Date(o.submitted_at).toLocaleString() : '—'}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
         {alpacaPf?.positions?.length > 0 && (
           <div className="overflow-x-auto">
+            <div className="text-xs font-semibold text-gray-700 mb-1">Current Holdings <span className="font-normal text-gray-400">({alpacaPf.positions.length})</span></div>
             <table className="w-full text-xs">
               <thead><tr className="border-b border-gray-100 text-gray-400">
                 <th className="text-left py-1">Symbol</th><th className="text-right">Qty</th>
